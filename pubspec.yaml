@@ -1,7 +1,7 @@
 name: pure_dart_quic
-description: A sample command-line application.
-version: 1.0.0
-# repository: https://github.com/my_org/my_repo
+description: A pure Dart implementation of.3, HTTP/3, and WebTransport, including packet protection, handshake key derivation, QPACK, and WebTransport DATAGRAM support
+version: 1.0.1
+repository: https://github.com/KellyKinyama/pure-dart-quic
 
 environment:
   sdk: ^3.11.5
