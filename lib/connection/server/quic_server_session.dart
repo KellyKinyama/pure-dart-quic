@@ -372,7 +372,7 @@ class QuicServerSession {
       ce: 0,
     );
 
-    Uint8List ackPayload = ackFrame.encode();
+    final Uint8List ackPayload = ackFrame.encode();
     final pn = _allocateSendPn(level);
 
     final writeKeys = switch (level) {
@@ -388,61 +388,23 @@ class QuicServerSession {
     final Uint8List dcidToUse = peerScid;
     final Uint8List scidToUse = localCid;
 
-    Uint8List? rawPacket;
+    final String packetType = switch (level) {
+      EncryptionLevel.initial => "initial",
+      EncryptionLevel.handshake => "handshake",
+      EncryptionLevel.application => "short",
+    };
 
-    if (level == EncryptionLevel.initial) {
-      while (true) {
-        rawPacket = encryptQuicPacket(
-          "initial",
-          ackPayload,
-          writeKeys.key,
-          writeKeys.iv,
-          writeKeys.hp,
-          pn,
-          dcidToUse,
-          scidToUse,
-          Uint8List(0),
-        );
-
-        if (rawPacket == null) {
-          print("❌ Failed to encrypt ACK ($level)");
-          return;
-        }
-
-        if (rawPacket.length >= 1200) break;
-
-        final deficit = 1200 - rawPacket.length;
-        ackPayload = Uint8List.fromList([...ackPayload, ...Uint8List(deficit)]);
-      }
-    } else if (level == EncryptionLevel.handshake) {
-      rawPacket = encryptQuicPacket(
-        "handshake",
-        ackPayload,
-        writeKeys.key,
-        writeKeys.iv,
-        writeKeys.hp,
-        pn,
-        dcidToUse,
-        scidToUse,
-        Uint8List(0),
-      );
-    } else {
-      rawPacket = encryptQuicPacket(
-        "short",
-        ackPayload,
-        writeKeys.key,
-        writeKeys.iv,
-        writeKeys.hp,
-        pn,
-        dcidToUse,
-        scidToUse,
-        Uint8List(0),
-      );
-    }
-
-    if (handshakeComplete && level != EncryptionLevel.application) {
-      throw StateError("BUG: non-application ACK after handshake");
-    }
+    final rawPacket = encryptQuicPacket(
+      packetType,
+      ackPayload,
+      writeKeys.key,
+      writeKeys.iv,
+      writeKeys.hp,
+      pn,
+      dcidToUse,
+      scidToUse,
+      Uint8List(0),
+    );
 
     if (rawPacket == null) {
       print("❌ Failed to encrypt ACK ($level)");
@@ -452,10 +414,10 @@ class QuicServerSession {
     socket.send(rawPacket, peerAddress, peerPort);
 
     print(
-      "✅ Sent ACK ($level) pn=$pn acked=${ackState.received.toList()..sort()}",
+      "✅ Sent ACK ($level) pn=$pn "
+      "acked=${ackState.received.toList()..sort()}",
     );
   }
-
   // ============================================================
   // Payload / frame parsing
   // ============================================================
