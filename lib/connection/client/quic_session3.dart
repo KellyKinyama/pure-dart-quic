@@ -2298,43 +2298,43 @@ class QuicSession {
   //     '0x${frameType.toRadixString(16)}',
   //   );
   // }
-  void _handleHttp3ControlFrame(int frameType, Uint8List payload) {
-    if (frameType == H3_FRAME_SETTINGS) {
-      final settings = parse_h3_settings_frame(payload);
-      h3.peerSettings
-        ..clear()
-        ..addAll(settings);
-      h3.settingsReceived = true;
+  // void _handleHttp3ControlFrame(int frameType, Uint8List payload) {
+  //   if (frameType == H3_FRAME_SETTINGS) {
+  //     final settings = parse_h3_settings_frame(payload);
+  //     h3.peerSettings
+  //       ..clear()
+  //       ..addAll(settings);
+  //     h3.settingsReceived = true;
 
-      print('✅ Received HTTP/3 SETTINGS from server: $settings');
+  //     print('✅ Received HTTP/3 SETTINGS from server: $settings');
 
-      // --------------------------------------------------------
-      // WebTransport test trigger:
-      // As soon as SETTINGS arrive, open a WT CONNECT stream.
-      // --------------------------------------------------------
-      if (!webTransportConnectSent) {
-        final sessionId = openWebTransportSession(
-          '/wt',
-          authority: 'localhost',
-          scheme: 'https',
-          address: InternetAddress('127.0.0.1'),
-          port: 4433,
-        );
+  //     // --------------------------------------------------------
+  //     // WebTransport test trigger:
+  //     // As soon as SETTINGS arrive, open a WT CONNECT stream.
+  //     // --------------------------------------------------------
+  //     if (!webTransportConnectSent) {
+  //       final sessionId = openWebTransportSession(
+  //         '/wt',
+  //         authority: 'localhost',
+  //         scheme: 'https',
+  //         address: InternetAddress('127.0.0.1'),
+  //         port: 4433,
+  //       );
 
-        activeWebTransportSessionId = sessionId;
-        webTransportConnectSent = true;
+  //       activeWebTransportSessionId = sessionId;
+  //       webTransportConnectSent = true;
 
-        print('🧪 WebTransport test: CONNECT sent on stream $sessionId');
-      }
+  //       print('🧪 WebTransport test: CONNECT sent on stream $sessionId');
+  //     }
 
-      return;
-    }
+  //     return;
+  //   }
 
-    print(
-      'ℹ️ Ignoring unsupported control-stream frame '
-      '0x${frameType.toRadixString(16)}',
-    );
-  }
+  //   print(
+  //     'ℹ️ Ignoring unsupported control-stream frame '
+  //     '0x${frameType.toRadixString(16)}',
+  //   );
+  // }
 
   void _handleHttp3RequestStreamFrame(
     int streamId,
@@ -2669,6 +2669,114 @@ class QuicSession {
 
     return Uint8List.fromList([...writeVarInt(0x30), ...payload]);
   }
+
+  void ensureClientH3BootstrapStreamsSent() {
+    sendClientControlStream();
+    sendClientQpackEncoderStream();
+    sendClientQpackDecoderStream();
+  }
+
+  void sendClientControlStream() {
+    if (clientControlStreamSent) return;
+
+    final controlBytes = build_control_stream({
+      'SETTINGS_QPACK_MAX_TABLE_CAPACITY': 0,
+      'SETTINGS_QPACK_BLOCKED_STREAMS': 0,
+      'SETTINGS_ENABLE_CONNECT_PROTOCOL': 1,
+      'SETTINGS_ENABLE_WEBTRANSPORT': 1,
+      'SETTINGS_H3_DATAGRAM': 1,
+    });
+
+    final streamId = _allocateClientUniStreamId();
+
+    sendApplicationStream(streamId, controlBytes, fin: false, offset: 0);
+
+    clientControlStreamSent = true;
+
+    print('✅ Client HTTP/3 control stream sent on stream $streamId');
+  }
+
+  void sendClientQpackEncoderStream() {
+    if (clientQpackEncoderStreamSent) return;
+
+    final streamId = _allocateClientUniStreamId();
+
+    final payload = Uint8List.fromList([
+      ...writeVarInt(0x02), // QPACK encoder stream type
+    ]);
+
+    sendApplicationStream(streamId, payload, fin: false, offset: 0);
+
+    clientQpackEncoderStreamSent = true;
+
+    print('✅ Client QPACK encoder stream sent on stream $streamId');
+  }
+
+  void sendClientQpackDecoderStream() {
+    if (clientQpackDecoderStreamSent) return;
+
+    final streamId = _allocateClientUniStreamId();
+
+    final payload = Uint8List.fromList([
+      ...writeVarInt(0x03), // QPACK decoder stream type
+    ]);
+
+    sendApplicationStream(streamId, payload, fin: false, offset: 0);
+
+    clientQpackDecoderStreamSent = true;
+
+    print('✅ Client QPACK decoder stream sent on stream $streamId');
+  }
+
+  void _handleHttp3ControlFrame(int frameType, Uint8List payload) {
+    if (frameType == H3_FRAME_SETTINGS) {
+      final settings = parse_h3_settings_frame(payload);
+      h3.peerSettings
+        ..clear()
+        ..addAll(settings);
+      h3.settingsReceived = true;
+
+      print('✅ Received HTTP/3 SETTINGS from server: $settings');
+
+      // --------------------------------------------------------
+      // Real HTTP/3 servers expect the client to open its own
+      // bootstrap unidirectional streams before sending requests:
+      //   - control stream
+      //   - QPACK encoder stream
+      //   - QPACK decoder stream
+      // --------------------------------------------------------
+      if (!webTransportConnectSent) {
+        ensureClientH3BootstrapStreamsSent();
+
+        final sessionId = openWebTransportSession(
+          '/wt',
+          authority: 'localhost',
+          scheme: 'https',
+          address: InternetAddress('127.0.0.1'),
+          port: 4433,
+        );
+
+        activeWebTransportSessionId = sessionId;
+        webTransportConnectSent = true;
+
+        print('🧪 WebTransport test: CONNECT sent on stream $sessionId');
+      }
+
+      return;
+    }
+
+    print(
+      'ℹ️ Ignoring unsupported control-stream frame '
+      '0x${frameType.toRadixString(16)}',
+    );
+  }
+
+  // ------------
+  // Client HTTP/3 bootstrap state
+  // ------------------------------------------------------------
+  bool clientControlStreamSent = false;
+  bool clientQpackEncoderStreamSent = false;
+  bool clientQpackDecoderStreamSent = false;
 }
 
 // final clientHelloBytes = Uint8List.fromList(
