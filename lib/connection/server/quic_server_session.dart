@@ -22,6 +22,7 @@ import '../../handshake/tls_server_builder.dart';
 // import '../../hkdf.dart';
 import '../../packet/quic_packet.dart';
 // import '../../quic_ack.dart';
+import '../../streams/stream.dart';
 import '../../utils.dart';
 // import '../cert_utils.dart';
 // import '../constants.dart';
@@ -459,6 +460,218 @@ class QuicServerSession {
   // Payload / frame parsing
   // ============================================================
 
+  // bool _parsePayload(Uint8List plaintext, EncryptionLevel level) {
+  //   print('--- Parsing Decrypted QUIC Payload (server) ---');
+
+  //   final buffer = QuicBuffer(data: plaintext);
+  //   bool ackEliciting = false;
+
+  //   try {
+  //     while (buffer.remaining > 0) {
+  //       final frameType = buffer.pullVarInt();
+
+  //       if (frameType == 0x00) {
+  //         continue;
+  //       }
+
+  //       if (frameType == 0x01) {
+  //         print('✅ Server parsed PING');
+  //         ackEliciting = true;
+  //         continue;
+  //       }
+
+  //       if (frameType == 0x02 || frameType == 0x03) {
+  //         final hasEcn = (frameType & 0x01) == 0x01;
+
+  //         if (buffer.remaining == 0) break;
+  //         final largest = buffer.pullVarInt();
+
+  //         if (buffer.remaining == 0) break;
+  //         final delay = buffer.pullVarInt();
+
+  //         if (buffer.remaining == 0) break;
+  //         final rangeCount = buffer.pullVarInt();
+
+  //         if (buffer.remaining == 0) break;
+  //         final firstRange = buffer.pullVarInt();
+
+  //         for (int i = 0; i < rangeCount; i++) {
+  //           if (buffer.remaining == 0) break;
+  //           buffer.pullVarInt();
+
+  //           if (buffer.remaining == 0) break;
+  //           buffer.pullVarInt();
+  //         }
+
+  //         if (hasEcn) {
+  //           if (buffer.remaining == 0) break;
+  //           buffer.pullVarInt();
+
+  //           if (buffer.remaining == 0) break;
+  //           buffer.pullVarInt();
+
+  //           if (buffer.remaining == 0) break;
+  //           buffer.pullVarInt();
+  //         }
+
+  //         print(
+  //           '✅ Server parsed ACK largest=$largest delay=$delay firstRange=$firstRange',
+  //         );
+  //         continue;
+  //       }
+
+  //       if (frameType == 0x06) {
+  //         if (buffer.remaining == 0) break;
+  //         final offset = buffer.pullVarInt();
+
+  //         if (buffer.remaining == 0) break;
+  //         final length = buffer.pullVarInt();
+
+  //         if (buffer.remaining < length) {
+  //           print(
+  //             '🛑 Server CRYPTO frame truncated: need $length, have ${buffer.remaining}',
+  //           );
+  //           break;
+  //         }
+
+  //         final data = buffer.pullBytes(length);
+
+  //         print('✅ Server parsed CRYPTO frame offset=$offset len=$length');
+  //         ackEliciting = true;
+
+  //         cryptoChunksByLevel[level]![offset] = data;
+  //         final assembled = assembleCryptoStream(level);
+
+  //         if (assembled.isNotEmpty) {
+  //           receivedHandshakeByLevel[level]!.add(assembled);
+
+  //           if (level == EncryptionLevel.initial) {
+  //             _maybeHandleClientHello();
+  //           } else if (level == EncryptionLevel.handshake) {
+  //             _maybeHandleClientFinished();
+  //           }
+  //         }
+  //         continue;
+  //       }
+
+  //       // STREAM frames (0x08..0x0f)
+  //       if ((frameType & 0xF8) == 0x08) {
+  //         final fin = (frameType & 0x01) != 0;
+  //         final hasLen = (frameType & 0x02) != 0;
+  //         final hasOff = (frameType & 0x04) != 0;
+
+  //         if (buffer.remaining == 0) break;
+  //         final streamId = buffer.pullVarInt();
+
+  //         final streamOffset = hasOff ? buffer.pullVarInt() : 0;
+  //         final dataLen = hasLen ? buffer.pullVarInt() : buffer.remaining;
+
+  //         if (buffer.remaining < dataLen) {
+  //           print(
+  //             '🛑 Server STREAM frame truncated: need $dataLen, have ${buffer.remaining}',
+  //           );
+  //           break;
+  //         }
+
+  //         final data = buffer.pullBytes(dataLen);
+
+  //         print(
+  //           '✅ Server parsed STREAM streamId=$streamId '
+  //           'offset=$streamOffset len=$dataLen fin=$fin',
+  //         );
+
+  //         ackEliciting = true;
+
+  //         if (level == EncryptionLevel.application) {
+  //           handleHttp3StreamChunk(streamId, streamOffset, data, fin: fin);
+  //         } else {
+  //           print('ℹ️ Ignoring non-application STREAM frame on level=$level');
+  //         }
+
+  //         continue;
+  //       }
+
+  //       // DATAGRAM frames (0x30, 0x31)
+  //       if (frameType == 0x30 || frameType == 0x31) {
+  //         final hasLen = frameType == 0x31;
+  //         final datagramLen = hasLen ? buffer.pullVarInt() : buffer.remaining;
+
+  //         if (buffer.remaining < datagramLen) {
+  //           print(
+  //             '🛑 Server DATAGRAM frame truncated: need $datagramLen, have ${buffer.remaining}',
+  //           );
+  //           break;
+  //         }
+
+  //         final payload = buffer.pullBytes(datagramLen);
+
+  //         print('✅ Server parsed DATAGRAM len=${payload.length}');
+  //         ackEliciting = true;
+
+  //         if (level == EncryptionLevel.application) {
+  //           handleWebTransportDatagram(payload);
+  //         } else {
+  //           print('ℹ️ Ignoring non-application DATAGRAM frame on level=$level');
+  //         }
+
+  //         continue;
+  //       }
+
+  //       if (frameType == 0x1e) {
+  //         print('✅ Server parsed HANDSHAKE_DONE');
+  //         ackEliciting = true;
+  //         continue;
+  //       }
+
+  //       if (frameType == 0x1c || frameType == 0x1d) {
+  //         if (buffer.remaining == 0) break;
+  //         final errorCode = buffer.pullVarInt();
+
+  //         int? offendingFrameType;
+  //         if (frameType == 0x1c) {
+  //           if (buffer.remaining == 0) break;
+  //           offendingFrameType = buffer.pullVarInt();
+  //         }
+
+  //         if (buffer.remaining == 0) break;
+  //         final reasonLen = buffer.pullVarInt();
+
+  //         if (buffer.remaining < reasonLen) {
+  //           print(
+  //             '🛑 Server CONNECTION_CLOSE reason truncated: need $reasonLen, have ${buffer.remaining}',
+  //           );
+  //           break;
+  //         }
+
+  //         final reasonBytes = reasonLen > 0
+  //             ? buffer.pullBytes(reasonLen)
+  //             : Uint8List(0);
+
+  //         final reason = utf8.decode(reasonBytes, allowMalformed: true);
+
+  //         print(
+  //           '🛑 Server parsed CONNECTION_CLOSE '
+  //           'frameType=0x${frameType.toRadixString(16)} '
+  //           'errorCode=0x${errorCode.toRadixString(16)} '
+  //           '${offendingFrameType != null ? 'offendingFrameType=0x${offendingFrameType.toRadixString(16)} ' : ''}'
+  //           'reason="$reason"',
+  //         );
+  //         break;
+  //       }
+
+  //       print(
+  //         'ℹ️ Server stopping on unsupported frame type 0x${frameType.toRadixString(16)}',
+  //       );
+  //       break;
+  //     }
+  //   } catch (e, st) {
+  //     print('🛑 Server payload parse error: $e\n$st');
+  //   }
+
+  //   print('🎉 Server payload parsing complete.');
+  //   return ackEliciting;
+  // }
+
   bool _parsePayload(Uint8List plaintext, EncryptionLevel level) {
     print('--- Parsing Decrypted QUIC Payload (server) ---');
 
@@ -469,16 +682,25 @@ class QuicServerSession {
       while (buffer.remaining > 0) {
         final frameType = buffer.pullVarInt();
 
+        // =========================================================
+        // PADDING (0x00)
+        // =========================================================
         if (frameType == 0x00) {
           continue;
         }
 
+        // =========================================================
+        // PING (0x01)
+        // =========================================================
         if (frameType == 0x01) {
           print('✅ Server parsed PING');
           ackEliciting = true;
           continue;
         }
 
+        // =========================================================
+        // ACK (0x02) / ACK + ECN (0x03)
+        // =========================================================
         if (frameType == 0x02 || frameType == 0x03) {
           final hasEcn = (frameType & 0x01) == 0x01;
 
@@ -496,21 +718,21 @@ class QuicServerSession {
 
           for (int i = 0; i < rangeCount; i++) {
             if (buffer.remaining == 0) break;
-            buffer.pullVarInt();
+            buffer.pullVarInt(); // gap
 
             if (buffer.remaining == 0) break;
-            buffer.pullVarInt();
+            buffer.pullVarInt(); // range length
           }
 
           if (hasEcn) {
             if (buffer.remaining == 0) break;
-            buffer.pullVarInt();
+            buffer.pullVarInt(); // ect0
 
             if (buffer.remaining == 0) break;
-            buffer.pullVarInt();
+            buffer.pullVarInt(); // ect1
 
             if (buffer.remaining == 0) break;
-            buffer.pullVarInt();
+            buffer.pullVarInt(); // ce
           }
 
           print(
@@ -519,6 +741,9 @@ class QuicServerSession {
           continue;
         }
 
+        // =========================================================
+        // CRYPTO (0x06)
+        // =========================================================
         if (frameType == 0x06) {
           if (buffer.remaining == 0) break;
           final offset = buffer.pullVarInt();
@@ -538,22 +763,15 @@ class QuicServerSession {
           print('✅ Server parsed CRYPTO frame offset=$offset len=$length');
           ackEliciting = true;
 
-          cryptoChunksByLevel[level]![offset] = data;
-          final assembled = assembleCryptoStream(level);
+          // Forward CRYPTO to session-owned reassembly/parsing
+          handleCryptoFrame(level: level, offset: offset, data: data);
 
-          if (assembled.isNotEmpty) {
-            receivedHandshakeByLevel[level]!.add(assembled);
-
-            if (level == EncryptionLevel.initial) {
-              _maybeHandleClientHello();
-            } else if (level == EncryptionLevel.handshake) {
-              _maybeHandleClientFinished();
-            }
-          }
           continue;
         }
 
+        // =========================================================
         // STREAM frames (0x08..0x0f)
+        // =========================================================
         if ((frameType & 0xF8) == 0x08) {
           final fin = (frameType & 0x01) != 0;
           final hasLen = (frameType & 0x02) != 0;
@@ -590,7 +808,9 @@ class QuicServerSession {
           continue;
         }
 
-        // DATAGRAM frames (0x30, 0x31)
+        // =========================================================
+        // DATAGRAM frames (0x30 no length, 0x31 with length)
+        // =========================================================
         if (frameType == 0x30 || frameType == 0x31) {
           final hasLen = frameType == 0x31;
           final datagramLen = hasLen ? buffer.pullVarInt() : buffer.remaining;
@@ -616,12 +836,37 @@ class QuicServerSession {
           continue;
         }
 
+        // =========================================================
+        // NEW_TOKEN (0x07)
+        // =========================================================
+        if (frameType == 0x07) {
+          if (buffer.remaining == 0) break;
+          final tokenLen = buffer.pullVarInt();
+
+          if (buffer.remaining < tokenLen) {
+            print(
+              '🛑 Server NEW_TOKEN truncated: need $tokenLen, have ${buffer.remaining}',
+            );
+            break;
+          }
+
+          final token = buffer.pullBytes(tokenLen);
+          print('ℹ️ Server parsed NEW_TOKEN len=${token.length}');
+          continue;
+        }
+
+        // =========================================================
+        // HANDSHAKE_DONE (0x1e)
+        // =========================================================
         if (frameType == 0x1e) {
           print('✅ Server parsed HANDSHAKE_DONE');
           ackEliciting = true;
           continue;
         }
 
+        // =========================================================
+        // CONNECTION_CLOSE transport/application (0x1c / 0x1d)
+        // =========================================================
         if (frameType == 0x1c || frameType == 0x1d) {
           if (buffer.remaining == 0) break;
           final errorCode = buffer.pullVarInt();
@@ -658,6 +903,9 @@ class QuicServerSession {
           break;
         }
 
+        // =========================================================
+        // Unknown frame
+        // =========================================================
         print(
           'ℹ️ Server stopping on unsupported frame type 0x${frameType.toRadixString(16)}',
         );
@@ -684,6 +932,42 @@ class QuicServerSession {
 
     cryptoReadOffsetByLevel[level] = readOffset;
     return Uint8List.fromList(out);
+  }
+
+  final Map<EncryptionLevel, QuicStreamReassembler> cryptoReassemblers = {
+    EncryptionLevel.initial: QuicStreamReassembler(),
+    EncryptionLevel.handshake: QuicStreamReassembler(),
+    EncryptionLevel.application: QuicStreamReassembler(),
+  };
+
+  void handleCryptoFrame({
+    required EncryptionLevel level,
+    required int offset,
+    required Uint8List data,
+  }) {
+    final reassembler = cryptoReassemblers[level];
+    if (reassembler == null) {
+      print('ℹ️ No server CRYPTO reassembler for $level');
+      return;
+    }
+
+    // Retransmission-safe insert
+    reassembler.insert(offset, data);
+
+    // Drain only newly contiguous bytes
+    final assembled = reassembler.drain();
+    if (assembled.isEmpty) {
+      return;
+    }
+
+    // Keep whatever handshake transcript / buffer you already use
+    receivedHandshakeByLevel[level]!.add(assembled);
+
+    if (level == EncryptionLevel.initial) {
+      _maybeHandleClientHello();
+    } else if (level == EncryptionLevel.handshake) {
+      _maybeHandleClientFinished();
+    }
   }
 
   // bool _streamContainsHandshakeType(BytesBuilder bb, int expectedType) {
