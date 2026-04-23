@@ -1615,3 +1615,10 @@ Map<String, dynamic> parse_webtransport_datagram(Uint8List payload) {
 
   return <String, dynamic>{'stream_id': streamId, 'data': data};
 }
+
+// const int H3_STREAM_TYPE_CONTROL = 0x00;
+// const int H3_STREAM_TYPE_QPACK_ENCODER = 0x02;
+// const int H3_STREAM_TYPE_QPACK_DECODER = 0x03;
+
+// WebTransport unidirectional stream type
+// const int WT_STREAM

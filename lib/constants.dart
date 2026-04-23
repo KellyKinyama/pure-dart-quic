@@ -21,15 +21,71 @@ const int H3_STREAM_TYPE_CONTROL = 0x00;
 
 const String WT_PROTOCOL = 'webtransport';
 
+// const int H3_FRAME_DATA = 0x00;
+// const int H3_FRAME_HEADERS = 0x01;
+// const int H3_FRAME_SETTINGS = 0x04;
+
+// const int H3_STREAM_TYPE_CONTROL = 0x00;
+const int H3_STREAM_TYPE_QPACK_ENCODER = 0x02;
+const int H3_STREAM_TYPE_QPACK_DECODER = 0x03;
+
+// WebTransport unidirectional stream type
+const int WT_STREAM_TYPE_UNI = 0x54;
+
+// const String WT_PROTOCOL = 'webtransport';
+
 class Http3State {
+  // ----------------------------------------------------------
+  // Existing behavior (kept exactly so current server keeps working)
+  // ----------------------------------------------------------
   bool controlStreamSent = false;
 
-  // Reassembly buffers per QUIC stream (HTTP/3 runs on QUIC streams)
-  final Map<int, Map<int, Uint8List>> streamChunks = {};
-  final Map<int, int> streamReadOffsets = {};
+  // Reassembly buffers per QUIC stream (raw QUIC stream bytes)
+  final Map<int, Map<int, Uint8List>> streamChunks =
+      <int, Map<int, Uint8List>>{};
+
+  // Current read offset per QUIC stream
+  final Map<int, int> streamReadOffsets = <int, int>{};
 
   // WebTransport sessions keyed by CONNECT stream id
-  final Map<int, WebTransportSession> webTransportSessions = {};
+  final Map<int, WebTransportSession> webTransportSessions =
+      <int, WebTransportSession>{};
+
+  // ----------------------------------------------------------
+  // New fields (additive only; safe for current server)
+  // ----------------------------------------------------------
+
+  /// Whether we have seen the peer's HTTP/3 control stream.
+  /// Useful if you later want to require client SETTINGS before
+  /// accepting CONNECT / WebTransport.
+  bool peerControlStreamSeen = false;
+
+  /// Stream classification:
+  ///   request
+  ///   client_control
+  ///   qpack_encoder
+  ///   qpack_decoder
+  ///   wt_uni
+  ///   other_client_uni
+  ///   other
+  final Map<int, String> streamKinds = <int, String>{};
+
+  /// For client/server uni streams, this stores the length of the
+  /// stream-type prefix varint so we can strip it before parsing
+  /// HTTP/3 frames or WT payloads.
+  final Map<int, int> streamTypePrefixLen = <int, int>{};
+
+  /// HTTP/3 frame reassembly buffers after removing uni-stream type prefixes.
+  /// This lets you parse H3 frames independently from the raw QUIC stream.
+  final Map<int, Map<int, Uint8List>> h3FrameChunks =
+      <int, Map<int, Uint8List>>{};
+
+  /// Read offsets for the H3-frame view of each stream.
+  final Map<int, int> h3FrameReadOffsets = <int, int>{};
+
+  /// For WebTransport unidirectional streams, remember which
+  /// CONNECT/session id a given QUIC stream belongs to.
+  final Map<int, int> wtUniSessionIdByStream = <int, int>{};
 }
 
 class WebTransportSession {

@@ -1509,52 +1509,52 @@ class QuicServerSession {
     print('✅ HTTP/3 control stream sent');
   }
 
-  void handleHttp3StreamChunk(
-    int streamId,
-    int streamOffset,
-    Uint8List streamData, {
-    required bool fin,
-  }) {
-    final chunks = h3.streamChunks.putIfAbsent(
-      streamId,
-      () => <int, Uint8List>{},
-    );
-    final readOffset = h3.streamReadOffsets[streamId] ?? 0;
+  // void handleHttp3StreamChunk(
+  //   int streamId,
+  //   int streamOffset,
+  //   Uint8List streamData, {
+  //   required bool fin,
+  // }) {
+  //   final chunks = h3.streamChunks.putIfAbsent(
+  //     streamId,
+  //     () => <int, Uint8List>{},
+  //   );
+  //   final readOffset = h3.streamReadOffsets[streamId] ?? 0;
 
-    chunks[streamOffset] = streamData;
+  //   chunks[streamOffset] = streamData;
 
-    final extracted = extract_h3_frames_from_chunks(chunks, readOffset);
-    h3.streamReadOffsets[streamId] = extracted['new_from_offset'] as int;
+  //   final extracted = extract_h3_frames_from_chunks(chunks, readOffset);
+  //   h3.streamReadOffsets[streamId] = extracted['new_from_offset'] as int;
 
-    for (final frame in extracted['frames']) {
-      final int type = frame['frame_type'] as int;
-      final Uint8List payload = frame['payload'] as Uint8List;
+  //   for (final frame in extracted['frames']) {
+  //     final int type = frame['frame_type'] as int;
+  //     final Uint8List payload = frame['payload'] as Uint8List;
 
-      if (type == H3_FRAME_HEADERS) {
-        _handleHttp3HeadersFrame(streamId, payload);
-        continue;
-      }
+  //     if (type == H3_FRAME_HEADERS) {
+  //       _handleHttp3HeadersFrame(streamId, payload);
+  //       continue;
+  //     }
 
-      if (type == H3_FRAME_DATA) {
-        print('📦 HTTP/3 DATA on stream=$streamId len=${payload.length}');
-        continue;
-      }
+  //     if (type == H3_FRAME_DATA) {
+  //       print('📦 HTTP/3 DATA on stream=$streamId len=${payload.length}');
+  //       continue;
+  //     }
 
-      if (type == H3_FRAME_SETTINGS) {
-        print('ℹ️ Ignoring unexpected SETTINGS on stream=$streamId');
-        continue;
-      }
+  //     if (type == H3_FRAME_SETTINGS) {
+  //       print('ℹ️ Ignoring unexpected SETTINGS on stream=$streamId');
+  //       continue;
+  //     }
 
-      print(
-        'ℹ️ Ignoring unsupported HTTP/3 frame type '
-        '0x${type.toRadixString(16)} on stream=$streamId',
-      );
-    }
+  //     print(
+  //       'ℹ️ Ignoring unsupported HTTP/3 frame type '
+  //       '0x${type.toRadixString(16)} on stream=$streamId',
+  //     );
+  //   }
 
-    if (fin) {
-      print('✅ QUIC stream $streamId FIN received');
-    }
-  }
+  //   if (fin) {
+  //     print('✅ QUIC stream $streamId FIN received');
+  //   }
+  // }
 
   void _handleHttp3HeadersFrame(int streamId, Uint8List headerBlock) {
     final headers = decode_qpack_header_fields(headerBlock);
@@ -1592,37 +1592,37 @@ class QuicServerSession {
     sendApplicationStream(streamId, responseFrames, fin: true);
   }
 
-  void _acceptWebTransportSession(int streamId) {
-    print('✅ WebTransport session accepted on stream $streamId');
+  // void _acceptWebTransportSession(int streamId) {
+  //   print('✅ WebTransport session accepted on stream $streamId');
 
-    h3.webTransportSessions[streamId] = WebTransportSession(streamId);
+  //   h3.webTransportSessions[streamId] = WebTransportSession(streamId);
 
-    final responseHeaderBlock = build_http3_literal_headers_frame({
-      ':status': '200',
-      'sec-webtransport-http3-draft': 'draft02',
-    });
+  //   final responseHeaderBlock = build_http3_literal_headers_frame({
+  //     ':status': '200',
+  //     'sec-webtransport-http3-draft': 'draft02',
+  //   });
 
-    final frames = build_h3_frames([
-      {'frame_type': H3_FRAME_HEADERS, 'payload': responseHeaderBlock},
-    ]);
+  //   final frames = build_h3_frames([
+  //     {'frame_type': H3_FRAME_HEADERS, 'payload': responseHeaderBlock},
+  //   ]);
 
-    sendApplicationStream(streamId, frames, fin: false);
-  }
+  //   sendApplicationStream(streamId, frames, fin: false);
+  // }
 
-  void handleWebTransportDatagram(Uint8List datagramPayload) {
-    final parsed = parse_webtransport_datagram(datagramPayload);
-    final int sessionId = parsed['stream_id'] as int;
-    final Uint8List data = parsed['data'] as Uint8List;
+  // void handleWebTransportDatagram(Uint8List datagramPayload) {
+  //   final parsed = parse_webtransport_datagram(datagramPayload);
+  //   final int sessionId = parsed['stream_id'] as int;
+  //   final Uint8List data = parsed['data'] as Uint8List;
 
-    final session = h3.webTransportSessions[sessionId];
-    if (session == null) {
-      print('⚠️ Datagram for unknown WebTransport session $sessionId');
-      return;
-    }
+  //   final session = h3.webTransportSessions[sessionId];
+  //   if (session == null) {
+  //     print('⚠️ Datagram for unknown WebTransport session $sessionId');
+  //     return;
+  //   }
 
-    print('📦 WebTransport datagram session=$sessionId len=${data.length}');
-    sendWebTransportDatagram(sessionId, data);
-  }
+  //   print('📦 WebTransport datagram session=$sessionId len=${data.length}');
+  //   sendWebTransportDatagram(sessionId, data);
+  // }
 
   void sendApplicationStream(
     int streamId,
@@ -1744,5 +1744,306 @@ class QuicServerSession {
     }
 
     return Uint8List.fromList([...writeVarInt(0x30), ...payload]);
+  }
+
+  bool _isClientInitiatedBidi(int streamId) => (streamId & 0x03) == 0x00;
+  bool _isClientInitiatedUni(int streamId) => (streamId & 0x03) == 0x02;
+  bool _isServerInitiatedUni(int streamId) => (streamId & 0x03) == 0x03;
+
+  void handleHttp3StreamChunk(
+    int streamId,
+    int streamOffset,
+    Uint8List streamData, {
+    required bool fin,
+  }) {
+    final chunks = h3.streamChunks.putIfAbsent(
+      streamId,
+      () => <int, Uint8List>{},
+    );
+    chunks[streamOffset] = streamData;
+
+    String kind = h3.streamKinds[streamId] ?? 'unknown';
+
+    // ----------------------------------------------------------
+    // 1) Determine stream kind
+    // ----------------------------------------------------------
+    if (kind == 'unknown') {
+      if (_isClientInitiatedBidi(streamId)) {
+        kind = 'request';
+        h3.streamKinds[streamId] = kind;
+        h3.streamTypePrefixLen[streamId] = 0;
+      } else if (_isClientInitiatedUni(streamId)) {
+        final zeroChunk = chunks[0];
+        if (zeroChunk == null) {
+          return; // need stream type prefix first
+        }
+
+        final typeInfo = readVarInt(zeroChunk, 0);
+        if (typeInfo == null) {
+          return;
+        }
+
+        final streamType = typeInfo.value as int;
+        final prefixLen = typeInfo.byteLength as int;
+        h3.streamTypePrefixLen[streamId] = prefixLen;
+
+        if (streamType == H3_STREAM_TYPE_CONTROL) {
+          kind = 'client_control';
+          h3.peerControlStreamSeen = true;
+          print('✅ Saw client HTTP/3 control stream on stream $streamId');
+        } else if (streamType == H3_STREAM_TYPE_QPACK_ENCODER) {
+          kind = 'qpack_encoder';
+          print('✅ Saw client QPACK encoder stream on stream $streamId');
+        } else if (streamType == H3_STREAM_TYPE_QPACK_DECODER) {
+          kind = 'qpack_decoder';
+          print('✅ Saw client QPACK decoder stream on stream $streamId');
+        } else if (streamType == WT_STREAM_TYPE_UNI) {
+          kind = 'wt_uni';
+          print('✅ Saw client WebTransport uni stream on stream $streamId');
+        } else {
+          kind = 'other_client_uni';
+          print(
+            'ℹ️ Ignoring unknown client uni stream type '
+            '0x${streamType.toRadixString(16)} on stream $streamId',
+          );
+        }
+
+        h3.streamKinds[streamId] = kind;
+      } else {
+        kind = 'other';
+        h3.streamKinds[streamId] = kind;
+        h3.streamTypePrefixLen[streamId] = 0;
+      }
+    }
+
+    final prefixLen = h3.streamTypePrefixLen[streamId] ?? 0;
+
+    // ----------------------------------------------------------
+    // 2) Handle request streams directly as HTTP/3 frame streams
+    // ----------------------------------------------------------
+    if (kind == 'request' || kind == 'client_control') {
+      final rawStart = streamOffset;
+      final rawEnd = streamOffset + streamData.length;
+
+      if (rawEnd <= prefixLen) {
+        return;
+      }
+
+      int sliceStartInChunk = 0;
+      int h3Offset = rawStart - prefixLen;
+
+      if (rawStart < prefixLen) {
+        sliceStartInChunk = prefixLen - rawStart;
+        h3Offset = 0;
+      }
+
+      final h3Bytes = streamData.sublist(sliceStartInChunk);
+
+      final frameChunks = h3.h3FrameChunks.putIfAbsent(
+        streamId,
+        () => <int, Uint8List>{},
+      );
+      frameChunks[h3Offset] = h3Bytes;
+
+      final readOffset = h3.h3FrameReadOffsets[streamId] ?? 0;
+      final extracted = extract_h3_frames_from_chunks(frameChunks, readOffset);
+      h3.h3FrameReadOffsets[streamId] = extracted['new_from_offset'] as int;
+
+      for (final frame in extracted['frames']) {
+        final int type = frame['frame_type'] as int;
+        final Uint8List payload = frame['payload'] as Uint8List;
+
+        if (kind == 'request') {
+          if (type == H3_FRAME_HEADERS) {
+            _handleHttp3HeadersFrame(streamId, payload);
+          } else if (type == H3_FRAME_DATA) {
+            print('📦 HTTP/3 DATA on stream=$streamId len=${payload.length}');
+          } else {
+            print(
+              'ℹ️ Ignoring unsupported request-stream frame '
+              '0x${type.toRadixString(16)} on stream=$streamId',
+            );
+          }
+        } else if (kind == 'client_control') {
+          if (type == H3_FRAME_SETTINGS) {
+            final settings = parse_h3_settings_frame(payload);
+            print('✅ Parsed client HTTP/3 SETTINGS: $settings');
+          } else {
+            print(
+              'ℹ️ Ignoring client control-frame type '
+              '0x${type.toRadixString(16)}',
+            );
+          }
+        }
+      }
+
+      if (fin) {
+        print('✅ QUIC stream $streamId FIN received');
+      }
+
+      return;
+    }
+
+    // ----------------------------------------------------------
+    // 3) QPACK streams (currently just recognize and ignore)
+    // ----------------------------------------------------------
+    if (kind == 'qpack_encoder' || kind == 'qpack_decoder') {
+      if (fin) {
+        print('✅ QPACK stream $streamId FIN received');
+      }
+      return;
+    }
+
+    // ----------------------------------------------------------
+    // 4) WebTransport unidirectional streams
+    // ----------------------------------------------------------
+    if (kind == 'wt_uni') {
+      _handleWebTransportUniStreamChunk(
+        streamId,
+        streamOffset,
+        streamData,
+        fin: fin,
+      );
+      return;
+    }
+
+    if (fin) {
+      print('✅ QUIC stream $streamId FIN received');
+    }
+  }
+
+  void _handleWebTransportUniStreamChunk(
+    int streamId,
+    int streamOffset,
+    Uint8List streamData, {
+    required bool fin,
+  }) {
+    final chunks = h3.streamChunks.putIfAbsent(
+      streamId,
+      () => <int, Uint8List>{},
+    );
+
+    final zeroChunk = chunks[0];
+    if (zeroChunk == null) return;
+
+    // Parse stream type
+    final typeInfo = readVarInt(zeroChunk, 0);
+    if (typeInfo == null) return;
+    if ((typeInfo.value as int) != WT_STREAM_TYPE_UNI) return;
+
+    // Parse session id after stream type
+    final sessionInfo = readVarInt(zeroChunk, typeInfo.byteLength as int);
+    if (sessionInfo == null) return;
+
+    final int sessionId = sessionInfo.value as int;
+    final int prefixLen =
+        (typeInfo.byteLength as int) + (sessionInfo.byteLength as int);
+
+    h3.wtUniSessionIdByStream[streamId] = sessionId;
+
+    final rawStart = streamOffset;
+    final rawEnd = streamOffset + streamData.length;
+
+    if (rawEnd <= prefixLen) {
+      return;
+    }
+
+    int sliceStartInChunk = 0;
+    if (rawStart < prefixLen) {
+      sliceStartInChunk = prefixLen - rawStart;
+    }
+
+    final payload = streamData.sublist(sliceStartInChunk);
+
+    final text = utf8.decode(payload, allowMalformed: true);
+    print(
+      '📨 WebTransport uni stream streamId=$streamId '
+      'session=$sessionId fin=$fin text=$text',
+    );
+
+    // Example: echo it back on a server-initiated WT uni stream
+    if (payload.isNotEmpty) {
+      sendWebTransportUniStream(sessionId, payload, fin: true);
+    }
+  }
+
+  void sendWebTransportUniStream(
+    int sessionId,
+    Uint8List payload, {
+    bool fin = true,
+  }) {
+    final streamId = _allocateServerUniStreamId();
+
+    final wtStreamBytes = Uint8List.fromList([
+      ...writeVarInt(WT_STREAM_TYPE_UNI),
+      ...writeVarInt(sessionId),
+      ...payload,
+    ]);
+
+    sendApplicationStream(streamId, wtStreamBytes, fin: fin, offset: 0);
+
+    print(
+      '✅ Sent WebTransport uni stream '
+      'streamId=$streamId session=$sessionId len=${payload.length}',
+    );
+  }
+
+  // void handleWebTransportDatagram(Uint8List datagramPayload) {
+  //   final parsed = parse_webtransport_datagram(datagramPayload);
+  //   final int sessionId = parsed['stream_id'] as int;
+  //   final Uint8List data = parsed['data'] as Uint8List;
+
+  //   final session = h3.webTransportSessions[sessionId];
+  //   if (session == null) {
+  //     print('⚠️ Datagram for unknown WebTransport session $sessionId');
+  //     return;
+  //   }
+
+  //   print('📦 WebTransport datagram session=$sessionId len=${data.length}');
+  //   sendWebTransportDatagram(sessionId, data);
+  // }
+
+  void handleWebTransportDatagram(Uint8List datagramPayload) {
+    final parsed = parse_webtransport_datagram(datagramPayload);
+    final int sessionId = parsed['stream_id'] as int;
+    final Uint8List data = parsed['data'] as Uint8List;
+
+    final session = h3.webTransportSessions[sessionId];
+    if (session == null) {
+      print('⚠️ Datagram for unknown WebTransport session $sessionId');
+      return;
+    }
+
+    final text = utf8.decode(data, allowMalformed: true);
+    print(
+      '📦 WebTransport datagram session=$sessionId '
+      'len=${data.length} text=$text',
+    );
+
+    // Example echo
+    sendWebTransportDatagram(sessionId, data);
+  }
+
+  void _acceptWebTransportSession(int streamId) {
+    if (!h3.peerControlStreamSeen) {
+      print('⚠️ Rejecting WebTransport CONNECT before client control stream');
+      return;
+    }
+
+    print('✅ WebTransport session accepted on stream $streamId');
+
+    h3.webTransportSessions[streamId] = WebTransportSession(streamId);
+
+    final responseHeaderBlock = build_http3_literal_headers_frame({
+      ':status': '200',
+      'sec-webtransport-http3-draft': 'draft02',
+    });
+
+    final frames = build_h3_frames([
+      {'frame_type': H3_FRAME_HEADERS, 'payload': responseHeaderBlock},
+    ]);
+
+    // Keep CONNECT stream open
+    sendApplicationStream(streamId, frames, fin: false);
   }
 }
