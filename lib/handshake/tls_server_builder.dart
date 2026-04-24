@@ -12,6 +12,7 @@ import 'package:crypto/crypto.dart' as crypto;
 
 import '../cipher/ecdsa.dart';
 import '../cipher/cert_utils.dart';
+import '../cipher/fingerprint.dart';
 import '../cipher/hash.dart';
 import 'server_hello.dart';
 // import '../hash.dart';
@@ -264,6 +265,7 @@ Uint8List buildEncryptedExtensions(List<BuiltExtension> extensions) {
 
 Uint8List buildCertificate(List<CertificateEntry> certificates) {
   final certList = BytesBuilder();
+  print("Certificates: $certificates");
 
   for (final c in certificates) {
     certList.add([
@@ -298,12 +300,58 @@ Uint8List buildCertificate(List<CertificateEntry> certificates) {
   ]);
 }
 
+Uint8List _extractFirstCertDerFromCertificateHandshake(Uint8List certMsg) {
+  // certMsg format:
+  // 0: handshake type (0x0b)
+  // 1..3: body length
+  // 4: cert_request_context length
+  // 5..7: certificate_list length
+  // 8..10: first cert length
+  // 11.. : first cert DER
+
+  if (certMsg.length < 11) {
+    throw StateError('Certificate handshake message too short');
+  }
+
+  if (certMsg[0] != 0x0b) {
+    throw StateError('Not a Certificate handshake message');
+  }
+
+  final contextLen = certMsg[4];
+  if (contextLen != 0) {
+    throw StateError('Expected empty certificate_request_context');
+  }
+
+  final certLen = (certMsg[8] << 16) | (certMsg[9] << 8) | certMsg[10];
+
+  final certStart = 11;
+  final certEnd = certStart + certLen;
+
+  if (certEnd > certMsg.length) {
+    throw StateError('Truncated certificate entry');
+  }
+
+  return certMsg.sublist(certStart, certEnd);
+}
+
 Uint8List _tpBytes(int id, Uint8List value) {
   return Uint8List.fromList([
     ..._encodeVarInt(id),
     ..._encodeVarInt(value.length),
     ...value,
   ]);
+}
+
+bool _bytesEqual(Uint8List a, Uint8List b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+
+  // Constant-time compare to avoid timing leaks.
+  var diff = 0;
+  for (var i = 0; i < a.length; i++) {
+    diff |= a[i] ^ b[i];
+  }
+  return diff == 0;
 }
 
 // =============================================================
@@ -466,6 +514,20 @@ ServerHandshakeArtifacts buildServerHandshakeArtifacts({
   ]);
 
   final cert = buildCertificate([CertificateEntry(cert: serverCert.cert)]);
+
+  final extractedCertDer = _extractFirstCertDerFromCertificateHandshake(cert);
+
+  final originalHash = createHash(serverCert.cert);
+  final extractedHash = createHash(extractedCertDer);
+
+  print('Original cert hash : ${fingerprint(originalHash)}');
+  print('Extracted cert hash: ${fingerprint(extractedHash)}');
+
+  if (!_bytesEqual(originalHash, extractedHash)) {
+    throw StateError(
+      'Certificate DER changed while building TLS Certificate message',
+    );
+  }
 
   // TLS 1.3 CertificateVerify signs over:
   // ClientHello || ServerHello || EncryptedExtensions || Certificate

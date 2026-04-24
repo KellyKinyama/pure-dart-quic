@@ -96,7 +96,9 @@ class QuicServerSession {
   bool handshakeComplete = false;
   bool serverHandshakeFinished = false;
 
-  EcdsaCert serverCert = generateSelfSignedCertificate();
+  // EcdsaCert serverCert = generateSelfSignedCertificate();
+  late final EcdsaCert serverCert = loadPinnedServerCertificate();
+
   KeyPair keyPair = KeyPair.generate();
 
   late ClientHello ch;
