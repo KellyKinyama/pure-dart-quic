@@ -6,6 +6,11 @@ repository: https://github.com/KellyKinyama/pure-dart-quic
 environment:
   sdk: ^3.11.5
 
+
+false_secrets:
+  - lib/cipher/cert_utils.dart
+
+
 # Add regular dependencies here.
 dependencies:
   basic_utils: ^5.8.2
