@@ -2,6 +2,7 @@
 import 'dart:typed_data';
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:ecdsa/ecdsa.dart';
 import 'package:elliptic/elliptic.dart';
 import 'package:hex/hex.dart';
@@ -9,6 +10,9 @@ import 'package:hex/hex.dart';
 // certificate_verify.dart
 // import 'dart:typed_data';
 import '../buffer.dart';
+import '../cipher/cert_utils.dart';
+import '../cipher/ecdsa.dart';
+import '../cipher/hash.dart';
 import 'tls_msg.dart';
 
 Uint8List _concat(List<Uint8List> items) {
@@ -139,4 +143,108 @@ class CertificateVerify extends TlsHandshakeMessage {
   @override
   String toString() =>
       "✅ CertificateVerify(alg=0x${algorithm.toRadixString(16)})";
+}
+
+void verifyServerCertificateAndSignature({
+  required Uint8List clientHello,
+  required Uint8List serverHello,
+  required Uint8List encryptedExtensions,
+  required Uint8List certificateHandshake,
+  required Uint8List certificateVerifyHandshake,
+  required Uint8List pinnedCertSha256,
+}) {
+  final certDer = extractFirstCertDerFromCertificateHandshake(
+    certificateHandshake,
+  );
+
+  final certHash = createHash(certDer);
+
+  if (!constantTimeEquals(certHash, pinnedCertSha256)) {
+    throw StateError('❌ Certificate pinning failed');
+  }
+
+  // ---- parse CertificateVerify ----
+  final sigAlg =
+      (certificateVerifyHandshake[4] << 8) | certificateVerifyHandshake[5];
+
+  if (sigAlg != 0x0403) {
+    throw StateError('Unsupported signature algorithm');
+  }
+
+  final sigLen =
+      (certificateVerifyHandshake[6] << 8) | certificateVerifyHandshake[7];
+
+  final signature = certificateVerifyHandshake.sublist(8, 8 + sigLen);
+
+  final transcriptHash = createHash(
+    Uint8List.fromList([
+      ...clientHello,
+      ...serverHello,
+      ...encryptedExtensions,
+      ...certificateHandshake,
+    ]),
+  );
+
+  final input = tls13CertificateVerifyInput(
+    contextString: 'TLS 1.3, server CertificateVerify',
+    transcriptHash: transcriptHash,
+  );
+
+  final digest = sha256.convert(input).bytes;
+
+  final publicKey = extractEcdsaPublicKeyFromCertificateDer(certDer);
+
+  if (!ecdsaVerify(publicKey, digest, signature)) {
+    throw StateError('❌ CertificateVerify signature invalid');
+  }
+
+  print('✅ Server certificate verified');
+}
+
+bool constantTimeEquals(Uint8List a, Uint8List b) {
+  if (a.length != b.length) return false;
+  int diff = 0;
+  for (int i = 0; i < a.length; i++) {
+    diff |= a[i] ^ b[i];
+  }
+  return diff == 0;
+}
+
+Uint8List tls13CertificateVerifyInput({
+  required String contextString,
+  required Uint8List transcriptHash,
+}) {
+  final prefix = Uint8List.fromList(List.filled(64, 0x20));
+  final context = Uint8List.fromList(utf8.encode(contextString));
+
+  return Uint8List.fromList([...prefix, ...context, 0x00, ...transcriptHash]);
+}
+
+Uint8List extractFirstCertDerFromCertificateHandshake(Uint8List certHandshake) {
+  // TLS Handshake header:
+  //   byte 0  : msg_type (0x0b)
+  //   byte 1-3: length
+  if (certHandshake.length < 11 || certHandshake[0] != 0x0b) {
+    throw StateError('Not a TLS Certificate handshake message');
+  }
+
+  // byte 4: certificate_request_context length (must be 0 for server)
+  final contextLen = certHandshake[4];
+  if (contextLen != 0) {
+    throw StateError('Non-empty certificate_request_context not supported');
+  }
+
+  // byte 5-7: certificate_list length (ignored here)
+  // byte 8-10: first certificate length
+  final certLen =
+      (certHandshake[8] << 16) | (certHandshake[9] << 8) | certHandshake[10];
+
+  final start = 11;
+  final end = start + certLen;
+
+  if (end > certHandshake.length) {
+    throw StateError('Truncated certificate DER');
+  }
+
+  return certHandshake.sublist(start, end);
 }

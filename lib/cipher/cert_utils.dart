@@ -660,3 +660,33 @@ EcdsaCert loadPinnedServerCertificate() {
     privateKeyPem: kPinnedServerKeyPem,
   );
 }
+
+/// ===========================================================
+/// Certificate public-key extraction
+/// ===========================================================
+
+Uint8List extractEcdsaPublicKeyFromCertificateDer(Uint8List certDer) {
+  final parser = ASN1Parser(certDer);
+  final certSeq = parser.nextObject() as ASN1Sequence;
+
+  final tbs = certSeq.elements![0] as ASN1Sequence;
+
+  // SubjectPublicKeyInfo
+  final spki =
+      tbs.elements!.firstWhere(
+            (e) =>
+                e is ASN1Sequence &&
+                e.elements?.length == 2 &&
+                e.elements![1] is ASN1BitString,
+          )
+          as ASN1Sequence;
+
+  final bitString = spki.elements![1] as ASN1BitString;
+  final pubKey = Uint8List.fromList(bitString.stringValues!);
+
+  if (pubKey.length != 65 || pubKey[0] != 0x04) {
+    throw StateError('Expected uncompressed ECDSA P-256 public key');
+  }
+
+  return pubKey;
+}
