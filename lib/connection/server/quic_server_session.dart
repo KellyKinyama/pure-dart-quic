@@ -339,7 +339,13 @@ class QuicServerSession {
   ) {
     ackStates[level]!.received.add(pkt.packetNumber);
 
-    if (!ackEliciting) {
+    // if (!ackEliciting) {
+    //   return;
+    // }
+
+    // ✅ ALWAYS ACK application packets
+    if (level == EncryptionLevel.application) {
+      sendAck(level: EncryptionLevel.application);
       return;
     }
 
@@ -387,7 +393,12 @@ class QuicServerSession {
       throw StateError("Write keys not available for $level");
     }
 
-    final Uint8List dcidToUse = peerScid;
+    // final Uint8List dcidToUse = peerScid;
+
+    final Uint8List dcidToUse = level == EncryptionLevel.application
+        ? _dcidForShortHeader()
+        : peerScid;
+
     final Uint8List scidToUse = localCid;
 
     final String packetType = switch (level) {
@@ -637,19 +648,19 @@ class QuicServerSession {
   // }
 
   void _sendHandshakeDone() {
-    if (appWrite == null) {
-      throw StateError('Cannot send HANDSHAKE_DONE before 1-RTT keys');
+    if (!applicationSecretsDerived || appWrite == null) {
+      throw StateError('Cannot send HANDSHAKE_DONE before 1‑RTT keys');
     }
 
     final pn = _allocateSendPn(EncryptionLevel.application);
 
-    // HANDSHAKE_DONE (0x1e) + PADDING (0x00)
-    // Pad to satisfy header-protection sample requirements
+    // HANDSHAKE_DONE (varint 0x1e is 1 byte)
+    // We must guarantee enough plaintext for HP sample
+    //
+    // Safe rule: at least 1 (frame) + 32 bytes padding
     final payload = Uint8List.fromList([
-      ...writeVarInt(0x1e), // HANDSHAKE_DONE frame
-      ...List<int>.filled(19, 0x00), // PADDING
-
-      ...writeVarInt(0x01), // PING (ack-eliciting)
+      ...writeVarInt(0x1e),
+      ...List<int>.filled(32, 0x00), // QUIC PADDING
     ]);
 
     final raw = encryptQuicPacket(
@@ -659,7 +670,7 @@ class QuicServerSession {
       appWrite!.iv,
       appWrite!.hp,
       pn,
-      peerScid,
+      _dcidForShortHeader(), // ✅ REQUIRED
       localCid,
       Uint8List(0),
     );
@@ -1025,13 +1036,63 @@ class QuicServerSession {
     }
   }
 
+  // void handleDatagram(Uint8List pkt) {
+  //   final packetLevel = detectPacketLevel(pkt);
+  //   print("📥 Server received packet level=$packetLevel len=${pkt.length}");
+
+  //   // Learn newer client CID from later long-header packets.
+  //   // This is critical before sending any 1-RTT short-header packets.
+  //   if (initialKeysReady) {
+  //     _maybeUpdatePeerCidFromPacket(pkt);
+  //   }
+
+  //   if (!initialKeysReady) {
+  //     if (packetLevel != EncryptionLevel.initial) {
+  //       print("ℹ️ Ignoring non-Initial packet before initial keys are ready");
+  //       return;
+  //     }
+  //     _deriveInitialKeysFromFirstPacket(pkt);
+
+  //     // Also update after the very first Initial
+  //     _maybeUpdatePeerCidFromPacket(pkt);
+  //   }
+
+  //   if (packetLevel == EncryptionLevel.handshake && handshakeRead == null) {
+  //     print("ℹ️ Ignoring early Handshake packet (handshake keys not ready)");
+  //     return;
+  //   }
+
+  //   if (packetLevel == EncryptionLevel.application &&
+  //       !applicationSecretsDerived) {
+  //     print("ℹ️ Ignoring early Application packet (1-RTT keys not ready)");
+  //     return;
+  //   }
+
+  //   final decrypted = decryptPacket(pkt, packetLevel);
+  //   final ackEliciting = _parsePayload(decrypted.plaintext!, packetLevel);
+  //   _onDecryptedPacket(decrypted, packetLevel, ackEliciting);
+  // }
+
+  Uint8List _dcidForShortHeader() {
+    // Prefer a peer-provided CID if one was ever advertised
+    if (peerScid.isNotEmpty) {
+      return peerScid;
+    }
+
+    // RFC 9000: If peer never provides a CID, continue using ODCID
+    if (clientOrigDcid.isNotEmpty) {
+      return clientOrigDcid;
+    }
+
+    throw StateError('No valid DCID for short-header packet');
+  }
+
   void handleDatagram(Uint8List pkt) {
     final packetLevel = detectPacketLevel(pkt);
     print("📥 Server received packet level=$packetLevel len=${pkt.length}");
 
-    // Learn newer client CID from later long-header packets.
-    // This is critical before sending any 1-RTT short-header packets.
-    if (initialKeysReady) {
+    // ✅ CID learning strictly limited to long-header packets
+    if ((pkt[0] & 0x80) != 0 && packetLevel != EncryptionLevel.application) {
       _maybeUpdatePeerCidFromPacket(pkt);
     }
 
@@ -1041,9 +1102,7 @@ class QuicServerSession {
         return;
       }
       _deriveInitialKeysFromFirstPacket(pkt);
-
-      // Also update after the very first Initial
-      _maybeUpdatePeerCidFromPacket(pkt);
+      return;
     }
 
     if (packetLevel == EncryptionLevel.handshake && handshakeRead == null) {
@@ -1371,9 +1430,12 @@ class QuicServerSession {
       throw ArgumentError("varint too large for this helper: $value");
     }
   }
+
   // ============================================================
   // Client Finished handling
   // ============================================================
+  bool h3BootstrapComplete = false;
+  bool qpackStreamsSent = false;
 
   void _maybeHandleClientFinished() {
     if (clientFinishedVerified) return;
@@ -1429,21 +1491,75 @@ class QuicServerSession {
     // sendHttp3ControlStream();
     // sendQpackStreams();
 
+    // _sendHandshakeDone();
+
+    // sendHttp3ControlStream(); // ONE control stream, ONE SETTINGS
+    // sendQpackStreams(); // encoder + decoder
+    // 1️⃣ HANDSHAKE_DONE
     _sendHandshakeDone();
 
-    sendHttp3ControlStream(); // ONE control stream, ONE SETTINGS
-    sendQpackStreams(); // encoder + decoder
+    // 2️⃣ HTTP/3 SETTINGS (MUST be first control stream bytes)
+    sendHttp3ControlStream();
+
+    // 3️⃣ QPACK streams
+    sendQpackStreams();
+
+    // 4️⃣ Transport flow control
+    sendMaxData(1024 * 1024);
+    sendMaxStreamDataBidi(64 * 1024);
+    sendMaxStreamsBidi(100);
+  }
+
+  void sendMaxData(int maxBytes) {
+    final frame = Uint8List.fromList([
+      ...writeVarInt(0x10), // MAX_DATA
+      ...writeVarInt(maxBytes),
+    ]);
+
+    _sendApplicationControlFrame(frame, 'MAX_DATA=$maxBytes');
+  }
+
+  void sendMaxStreamDataBidi(int maxBytes) {
+    final frame = Uint8List.fromList([
+      ...writeVarInt(0x11), // MAX_STREAM_DATA
+      ...writeVarInt(0), // stream ID 0 (applies to first bidi stream)
+      ...writeVarInt(maxBytes),
+    ]);
+
+    _sendApplicationControlFrame(frame, 'MAX_STREAM_DATA bidi=$maxBytes');
+  }
+
+  void _sendApplicationControlFrame(Uint8List frame, String label) {
+    final pn = _allocateSendPn(EncryptionLevel.application);
+
+    final raw = encryptQuicPacket(
+      'short',
+      frame,
+      appWrite!.key,
+      appWrite!.iv,
+      appWrite!.hp,
+      pn,
+      clientOrigDcid,
+      localCid,
+      Uint8List(0),
+    );
+
+    socket.send(raw!, peerAddress, peerPort);
+    print('✅ Sent $label');
   }
 
   void sendQpackStreams() {
-    // QPACK Encoder stream
+    if (qpackStreamsSent) return;
+    qpackStreamsSent = true;
+
+    // QPACK Encoder
     final encoderStreamId = _allocateServerUniStreamId();
     final encoderBytes = Uint8List.fromList([
       ...writeVarInt(H3_STREAM_TYPE_QPACK_ENCODER),
     ]);
     sendApplicationStream(encoderStreamId, encoderBytes, fin: false, offset: 0);
 
-    // QPACK Decoder stream
+    // QPACK Decoder
     final decoderStreamId = _allocateServerUniStreamId();
     final decoderBytes = Uint8List.fromList([
       ...writeVarInt(H3_STREAM_TYPE_QPACK_DECODER),
@@ -1670,37 +1786,37 @@ class QuicServerSession {
     sendApplicationStream(streamId, responseFrames, fin: true);
   }
 
-  // void _acceptWebTransportSession(int streamId) {
-  //   print('✅ WebTransport session accepted on stream $streamId');
+  void _acceptWebTransportSession(int streamId) {
+    print('✅ WebTransport session accepted on stream $streamId');
 
-  //   h3.webTransportSessions[streamId] = WebTransportSession(streamId);
+    h3.webTransportSessions[streamId] = WebTransportSession(streamId);
 
-  //   final responseHeaderBlock = build_http3_literal_headers_frame({
-  //     ':status': '200',
-  //     'sec-webtransport-http3-draft': 'draft02',
-  //   });
+    final responseHeaderBlock = build_http3_literal_headers_frame({
+      ':status': '200',
+      'sec-webtransport-http3-draft': 'draft02',
+    });
 
-  //   final frames = build_h3_frames([
-  //     {'frame_type': H3_FRAME_HEADERS, 'payload': responseHeaderBlock},
-  //   ]);
+    final frames = build_h3_frames([
+      {'frame_type': H3_FRAME_HEADERS, 'payload': responseHeaderBlock},
+    ]);
 
-  //   sendApplicationStream(streamId, frames, fin: false);
-  // }
+    sendApplicationStream(streamId, frames, fin: false);
+  }
 
-  // void handleWebTransportDatagram(Uint8List datagramPayload) {
-  //   final parsed = parse_webtransport_datagram(datagramPayload);
-  //   final int sessionId = parsed['stream_id'] as int;
-  //   final Uint8List data = parsed['data'] as Uint8List;
+  void handleWebTransportDatagram(Uint8List datagramPayload) {
+    final parsed = parse_webtransport_datagram(datagramPayload);
+    final int sessionId = parsed['stream_id'] as int;
+    final Uint8List data = parsed['data'] as Uint8List;
 
-  //   final session = h3.webTransportSessions[sessionId];
-  //   if (session == null) {
-  //     print('⚠️ Datagram for unknown WebTransport session $sessionId');
-  //     return;
-  //   }
+    final session = h3.webTransportSessions[sessionId];
+    if (session == null) {
+      print('⚠️ Datagram for unknown WebTransport session $sessionId');
+      return;
+    }
 
-  //   print('📦 WebTransport datagram session=$sessionId len=${data.length}');
-  //   sendWebTransportDatagram(sessionId, data);
-  // }
+    print('📦 WebTransport datagram session=$sessionId len=${data.length}');
+    sendWebTransportDatagram(sessionId, data);
+  }
 
   void sendApplicationStream(
     int streamId,
@@ -1728,7 +1844,7 @@ class QuicServerSession {
       appWrite!.iv,
       appWrite!.hp,
       pn,
-      peerScid,
+      _dcidForShortHeader(), // ✅ REQUIRED
       localCid,
       Uint8List(0),
     );
@@ -2096,6 +2212,33 @@ class QuicServerSession {
     );
   }
 
+  void sendMaxStreamsBidi(int max) {
+    if (!applicationSecretsDerived || appWrite == null) return;
+
+    final frame = Uint8List.fromList([
+      ...writeVarInt(0x12), // MAX_STREAMS (bidi)
+      ...writeVarInt(max),
+    ]);
+
+    final pn = _allocateSendPn(EncryptionLevel.application);
+
+    final raw = encryptQuicPacket(
+      'short',
+      frame,
+      appWrite!.key,
+      appWrite!.iv,
+      appWrite!.hp,
+      pn,
+      _dcidForShortHeader(),
+      localCid,
+      Uint8List(0),
+    );
+
+    socket.send(raw!, peerAddress, peerPort);
+
+    print('✅ Sent MAX_STREAMS bidi = $max');
+  }
+
   // void handleWebTransportDatagram(Uint8List datagramPayload) {
   //   final parsed = parse_webtransport_datagram(datagramPayload);
   //   final int sessionId = parsed['stream_id'] as int;
@@ -2111,47 +2254,47 @@ class QuicServerSession {
   //   sendWebTransportDatagram(sessionId, data);
   // }
 
-  void handleWebTransportDatagram(Uint8List datagramPayload) {
-    final parsed = parse_webtransport_datagram(datagramPayload);
-    final int sessionId = parsed['stream_id'] as int;
-    final Uint8List data = parsed['data'] as Uint8List;
+  // void handleWebTransportDatagram(Uint8List datagramPayload) {
+  //   final parsed = parse_webtransport_datagram(datagramPayload);
+  //   final int sessionId = parsed['stream_id'] as int;
+  //   final Uint8List data = parsed['data'] as Uint8List;
 
-    final session = h3.webTransportSessions[sessionId];
-    if (session == null) {
-      print('⚠️ Datagram for unknown WebTransport session $sessionId');
-      return;
-    }
+  //   final session = h3.webTransportSessions[sessionId];
+  //   if (session == null) {
+  //     print('⚠️ Datagram for unknown WebTransport session $sessionId');
+  //     return;
+  //   }
 
-    final text = utf8.decode(data, allowMalformed: true);
-    print(
-      '📦 WebTransport datagram session=$sessionId '
-      'len=${data.length} text=$text',
-    );
+  //   final text = utf8.decode(data, allowMalformed: true);
+  //   print(
+  //     '📦 WebTransport datagram session=$sessionId '
+  //     'len=${data.length} text=$text',
+  //   );
 
-    // Example echo
-    sendWebTransportDatagram(sessionId, data);
-  }
+  //   // Example echo
+  //   sendWebTransportDatagram(sessionId, data);
+  // }
 
-  void _acceptWebTransportSession(int streamId) {
-    if (!h3.peerControlStreamSeen) {
-      print('⚠️ Rejecting WebTransport CONNECT before client control stream');
-      return;
-    }
+  // void _acceptWebTransportSession(int streamId) {
+  //   if (!h3.peerControlStreamSeen) {
+  //     print('⚠️ Rejecting WebTransport CONNECT before client control stream');
+  //     return;
+  //   }
 
-    print('✅ WebTransport session accepted on stream $streamId');
+  //   print('✅ WebTransport session accepted on stream $streamId');
 
-    h3.webTransportSessions[streamId] = WebTransportSession(streamId);
+  //   h3.webTransportSessions[streamId] = WebTransportSession(streamId);
 
-    final responseHeaderBlock = build_http3_literal_headers_frame({
-      ':status': '200',
-      'sec-webtransport-http3-draft': 'draft02',
-    });
+  //   final responseHeaderBlock = build_http3_literal_headers_frame({
+  //     ':status': '200',
+  //     'sec-webtransport-http3-draft': 'draft02',
+  //   });
 
-    final frames = build_h3_frames([
-      {'frame_type': H3_FRAME_HEADERS, 'payload': responseHeaderBlock},
-    ]);
+  //   final frames = build_h3_frames([
+  //     {'frame_type': H3_FRAME_HEADERS, 'payload': responseHeaderBlock},
+  //   ]);
 
-    // Keep CONNECT stream open
-    sendApplicationStream(streamId, frames, fin: false);
-  }
+  //   // Keep CONNECT stream open
+  //   sendApplicationStream(streamId, frames, fin: false);
+  // }
 }

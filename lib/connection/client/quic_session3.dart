@@ -26,7 +26,7 @@ import '../../handshake/encrypted_extensions.dart';
 import '../../handshake/finished.dart';
 import '../../handshake/server_hello.dart';
 // import '../../handshake/tls_messages.dart';
-import '../../handshake/tls_messages2.dart';
+// import '../../handshake/tls_messages2.dart';
 import '../../handshake/tls_msg.dart';
 // import '../../hash.dart';
 // import '../../hkdf.dart';
@@ -1873,7 +1873,7 @@ class QuicSession {
       receivedTlsMessages.addAll(messages);
       _maybeLogServerArtifacts(this);
 
-      _maybeVerifyServerCertificate(); // ✅ ADD THIS
+      // _maybeVerifyServerCertificate(); // ✅ ADD THIS
     }
 
     return messages;
@@ -2222,6 +2222,11 @@ class QuicSession {
         final prefixLen = typeInfo.byteLength as int;
 
         h3.streamTypePrefixLen[streamId] = prefixLen;
+
+        print(
+          '🟦 SERVER UNI STREAM '
+          'id=$streamId type=0x${streamType.toRadixString(16)}',
+        );
 
         if (streamType == H3_STREAM_TYPE_CONTROL) {
           kind = 'control';
