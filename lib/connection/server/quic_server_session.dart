@@ -636,6 +636,42 @@ class QuicServerSession {
   //   return ackEliciting;
   // }
 
+  void _sendHandshakeDone() {
+    if (appWrite == null) {
+      throw StateError('Cannot send HANDSHAKE_DONE before 1-RTT keys');
+    }
+
+    final pn = _allocateSendPn(EncryptionLevel.application);
+
+    // HANDSHAKE_DONE (0x1e) + PADDING (0x00)
+    // Pad to satisfy header-protection sample requirements
+    final payload = Uint8List.fromList([
+      ...writeVarInt(0x1e), // HANDSHAKE_DONE frame
+      ...List<int>.filled(19, 0x00), // PADDING
+
+      ...writeVarInt(0x01), // PING (ack-eliciting)
+    ]);
+
+    final raw = encryptQuicPacket(
+      'short',
+      payload,
+      appWrite!.key,
+      appWrite!.iv,
+      appWrite!.hp,
+      pn,
+      peerScid,
+      localCid,
+      Uint8List(0),
+    );
+
+    if (raw == null) {
+      throw StateError('Failed to encrypt HANDSHAKE_DONE');
+    }
+
+    socket.send(raw, peerAddress, peerPort);
+    print('✅ Server sent HANDSHAKE_DONE');
+  }
+
   bool _parsePayload(Uint8List plaintext, EncryptionLevel level) {
     print('--- Parsing Decrypted QUIC Payload (server) ---');
 
@@ -1387,9 +1423,34 @@ class QuicServerSession {
     print("✅ Client Finished verified");
 
     _deriveApplicationSecrets();
+    // _sendHandshakeDone();
 
-    // ✅ Start HTTP/3 / WebTransport immediately after 1-RTT is ready
-    sendHttp3ControlStream();
+    // // ✅ Start HTTP/3 / WebTransport immediately after 1-RTT is ready
+    // sendHttp3ControlStream();
+    // sendQpackStreams();
+
+    _sendHandshakeDone();
+
+    sendHttp3ControlStream(); // ONE control stream, ONE SETTINGS
+    sendQpackStreams(); // encoder + decoder
+  }
+
+  void sendQpackStreams() {
+    // QPACK Encoder stream
+    final encoderStreamId = _allocateServerUniStreamId();
+    final encoderBytes = Uint8List.fromList([
+      ...writeVarInt(H3_STREAM_TYPE_QPACK_ENCODER),
+    ]);
+    sendApplicationStream(encoderStreamId, encoderBytes, fin: false, offset: 0);
+
+    // QPACK Decoder stream
+    final decoderStreamId = _allocateServerUniStreamId();
+    final decoderBytes = Uint8List.fromList([
+      ...writeVarInt(H3_STREAM_TYPE_QPACK_DECODER),
+    ]);
+    sendApplicationStream(decoderStreamId, decoderBytes, fin: false, offset: 0);
+
+    print('✅ Sent QPACK encoder and decoder streams');
   }
 
   // ============================================================
@@ -1483,7 +1544,9 @@ class QuicServerSession {
   // ============================================================
   // HTTP/3 + WebTransport methods
   // ============================================================
-
+  // HTTP/3 server control stream tracking
+  int? serverControlStreamId;
+  int serverControlStreamOffset = 0;
   void sendHttp3ControlStream() {
     if (h3.controlStreamSent) return;
     if (!applicationSecretsDerived || appWrite == null) {
@@ -1505,10 +1568,23 @@ class QuicServerSession {
       ...settingsPayload,
     ]);
 
-    sendApplicationUnidirectionalStream(controlStreamBytes, fin: false);
+    // ✅ Allocate exactly ONE server-initiated unidirectional stream
+    serverControlStreamId ??= _allocateServerUniStreamId();
+
+    sendApplicationStream(
+      serverControlStreamId!,
+      controlStreamBytes,
+      fin: false,
+      offset: 0,
+    );
+
+    serverControlStreamOffset = controlStreamBytes.length;
     h3.controlStreamSent = true;
 
-    print('✅ HTTP/3 control stream sent');
+    print(
+      '✅ HTTP/3 control stream sent '
+      '(streamId=$serverControlStreamId)',
+    );
   }
 
   // void handleHttp3StreamChunk(
@@ -1752,6 +1828,33 @@ class QuicServerSession {
   bool _isClientInitiatedUni(int streamId) => (streamId & 0x03) == 0x02;
   bool _isServerInitiatedUni(int streamId) => (streamId & 0x03) == 0x03;
 
+  void sendHttp3SettingsPing() {
+    if (!applicationSecretsDerived ||
+        appWrite == null ||
+        serverControlStreamId == null) {
+      return;
+    }
+
+    final settingsFrame = Uint8List.fromList([
+      ...writeVarInt(H3_FRAME_SETTINGS),
+      ...writeVarInt(0), // empty SETTINGS is legal
+    ]);
+
+    sendApplicationStream(
+      serverControlStreamId!,
+      settingsFrame,
+      fin: false,
+      offset: serverControlStreamOffset,
+    );
+
+    serverControlStreamOffset += settingsFrame.length;
+
+    print(
+      '✅ Sent HTTP/3 SETTINGS ping on control stream '
+      '(streamId=$serverControlStreamId)',
+    );
+  }
+
   void handleHttp3StreamChunk(
     int streamId,
     int streamOffset,
@@ -1793,6 +1896,9 @@ class QuicServerSession {
           kind = 'client_control';
           h3.peerControlStreamSeen = true;
           print('✅ Saw client HTTP/3 control stream on stream $streamId');
+
+          // 🔴 ADD THIS LINE
+          // sendHttp3SettingsPing();
         } else if (streamType == H3_STREAM_TYPE_QPACK_ENCODER) {
           kind = 'qpack_encoder';
           print('✅ Saw client QPACK encoder stream on stream $streamId');
