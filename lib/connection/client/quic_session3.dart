@@ -1800,9 +1800,10 @@ class QuicSession {
   }
 
   bool serverCertificateVerified = false;
+
   final Uint8List pinnedServerCertSha256 = Uint8List.fromList(
     HEX.decode(
-      "2FE20EE74386E79E5AA168695D5E505EDA55DD2DB87F0FD6D8E2F33DE1B3018E",
+      '2FE20EE74386E79E5AA168695D5E505EDA55DD2DB87F0FD6D8E2F33DE1B3018E',
     ),
   );
 
@@ -1835,7 +1836,6 @@ class QuicSession {
     serverCertificateVerified = true;
     print('✅ Server certificate VERIFIED');
   }
-  
 
   final Map<EncryptionLevel, QuicStreamReassembler> cryptoReassemblers = {
     EncryptionLevel.initial: QuicStreamReassembler(),

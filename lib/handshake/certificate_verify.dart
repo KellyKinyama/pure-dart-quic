@@ -153,22 +153,41 @@ void verifyServerCertificateAndSignature({
   required Uint8List certificateVerifyHandshake,
   required Uint8List pinnedCertSha256,
 }) {
+  // ------------------------------
+  // Extract certificate DER
+  // ------------------------------
   final certDer = extractFirstCertDerFromCertificateHandshake(
     certificateHandshake,
   );
 
+  // ------------------------------
+  // Hash certificate DER
+  // ------------------------------
   final certHash = createHash(certDer);
 
+  print('🔐 [CERT] Extracted DER SHA256 = ${HEX.encode(certHash)}');
+  print('📌 [PIN ] Pinned cert SHA256  = ${HEX.encode(pinnedCertSha256)}');
+
+  // ------------------------------
+  // Pin comparison
+  // ------------------------------
   if (!constantTimeEquals(certHash, pinnedCertSha256)) {
+    print('❌ [PIN ] MISMATCH');
     throw StateError('❌ Certificate pinning failed');
+  } else {
+    print('✅ [PIN ] Match');
   }
 
-  // ---- parse CertificateVerify ----
+  // ------------------------------
+  // Parse CertificateVerify
+  // ------------------------------
   final sigAlg =
       (certificateVerifyHandshake[4] << 8) | certificateVerifyHandshake[5];
 
   if (sigAlg != 0x0403) {
-    throw StateError('Unsupported signature algorithm');
+    throw StateError(
+      'Unsupported signature algorithm 0x${sigAlg.toRadixString(16)}',
+    );
   }
 
   final sigLen =
@@ -176,6 +195,12 @@ void verifyServerCertificateAndSignature({
 
   final signature = certificateVerifyHandshake.sublist(8, 8 + sigLen);
 
+  print('✍️  [CV ] Signature len = $sigLen');
+  print('✍️  [CV ] Signature DER = ${HEX.encode(signature)}');
+
+  // ------------------------------
+  // Transcript hash
+  // ------------------------------
   final transcriptHash = createHash(
     Uint8List.fromList([
       ...clientHello,
@@ -185,16 +210,33 @@ void verifyServerCertificateAndSignature({
     ]),
   );
 
+  print('📜 [CV ] Transcript hash = ${HEX.encode(transcriptHash)}');
+
+  // ------------------------------
+  // TLS 1.3 signing input
+  // ------------------------------
   final input = tls13CertificateVerifyInput(
     contextString: 'TLS 1.3, server CertificateVerify',
     transcriptHash: transcriptHash,
   );
 
-  final digest = sha256.convert(input).bytes;
+  final inputHash = sha256.convert(input).bytes;
+  print('📜 [CV ] Signing input SHA256 = ${HEX.encode(inputHash)}');
 
+  // ------------------------------
+  // Extract public key
+  // ------------------------------
   final publicKey = extractEcdsaPublicKeyFromCertificateDer(certDer);
+  print('🔑 [CERT] Server public key = ${HEX.encode(publicKey)}');
+  print('🔑 [CERT] Public key hash   = ${HEX.encode(createHash(publicKey))}');
 
-  if (!ecdsaVerify(publicKey, digest, signature)) {
+  // ------------------------------
+  // Verify ECDSA signature
+  // ------------------------------
+  final ok = ecdsaVerify(publicKey, inputHash, signature);
+
+  if (!ok) {
+    print('❌ [CV ] Signature verification FAILED');
     throw StateError('❌ CertificateVerify signature invalid');
   }
 

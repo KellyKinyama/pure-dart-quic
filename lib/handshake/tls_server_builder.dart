@@ -9,6 +9,7 @@ import 'dart:typed_data';
 
 // import 'package:hex/hex.dart';
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:hex/hex.dart';
 
 import '../cipher/ecdsa.dart';
 import '../cipher/cert_utils.dart';
@@ -521,7 +522,11 @@ ServerHandshakeArtifacts buildServerHandshakeArtifacts({
   final extractedHash = createHash(extractedCertDer);
 
   print('Original cert hash : ${fingerprint(originalHash)}');
-  print('Extracted cert hash: ${fingerprint(extractedHash)}');
+
+  print(
+    'Server certificate DER SHA256: '
+    '${fingerprint(serverCert.cert)}',
+  );
 
   if (!_bytesEqual(originalHash, extractedHash)) {
     throw StateError(

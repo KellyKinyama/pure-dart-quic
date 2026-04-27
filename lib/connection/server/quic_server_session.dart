@@ -127,7 +127,7 @@ class QuicServerSession {
   int nextServerUniStreamId = 3;
 
   QuicServerSession({required this.socket}) {
-    print("Server certificate hash: ${fingerprint(serverCert.fingerPrint)}");
+    print("Server certificate hash: ${fingerprint(serverCert.cert)}");
     localCid = _randomCid(8);
   }
 
