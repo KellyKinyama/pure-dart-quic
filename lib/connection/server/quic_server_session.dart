@@ -339,9 +339,9 @@ class QuicServerSession {
   ) {
     ackStates[level]!.received.add(pkt.packetNumber);
 
-    // if (!ackEliciting) {
-    //   return;
-    // }
+    if (!ackEliciting) {
+      return;
+    }
 
     // ✅ ALWAYS ACK application packets
     if (level == EncryptionLevel.application) {
@@ -1036,63 +1036,13 @@ class QuicServerSession {
     }
   }
 
-  // void handleDatagram(Uint8List pkt) {
-  //   final packetLevel = detectPacketLevel(pkt);
-  //   print("📥 Server received packet level=$packetLevel len=${pkt.length}");
-
-  //   // Learn newer client CID from later long-header packets.
-  //   // This is critical before sending any 1-RTT short-header packets.
-  //   if (initialKeysReady) {
-  //     _maybeUpdatePeerCidFromPacket(pkt);
-  //   }
-
-  //   if (!initialKeysReady) {
-  //     if (packetLevel != EncryptionLevel.initial) {
-  //       print("ℹ️ Ignoring non-Initial packet before initial keys are ready");
-  //       return;
-  //     }
-  //     _deriveInitialKeysFromFirstPacket(pkt);
-
-  //     // Also update after the very first Initial
-  //     _maybeUpdatePeerCidFromPacket(pkt);
-  //   }
-
-  //   if (packetLevel == EncryptionLevel.handshake && handshakeRead == null) {
-  //     print("ℹ️ Ignoring early Handshake packet (handshake keys not ready)");
-  //     return;
-  //   }
-
-  //   if (packetLevel == EncryptionLevel.application &&
-  //       !applicationSecretsDerived) {
-  //     print("ℹ️ Ignoring early Application packet (1-RTT keys not ready)");
-  //     return;
-  //   }
-
-  //   final decrypted = decryptPacket(pkt, packetLevel);
-  //   final ackEliciting = _parsePayload(decrypted.plaintext!, packetLevel);
-  //   _onDecryptedPacket(decrypted, packetLevel, ackEliciting);
-  // }
-
-  Uint8List _dcidForShortHeader() {
-    // Prefer a peer-provided CID if one was ever advertised
-    if (peerScid.isNotEmpty) {
-      return peerScid;
-    }
-
-    // RFC 9000: If peer never provides a CID, continue using ODCID
-    if (clientOrigDcid.isNotEmpty) {
-      return clientOrigDcid;
-    }
-
-    throw StateError('No valid DCID for short-header packet');
-  }
-
   void handleDatagram(Uint8List pkt) {
     final packetLevel = detectPacketLevel(pkt);
     print("📥 Server received packet level=$packetLevel len=${pkt.length}");
 
-    // ✅ CID learning strictly limited to long-header packets
-    if ((pkt[0] & 0x80) != 0 && packetLevel != EncryptionLevel.application) {
+    // Learn newer client CID from later long-header packets.
+    // This is critical before sending any 1-RTT short-header packets.
+    if (initialKeysReady) {
       _maybeUpdatePeerCidFromPacket(pkt);
     }
 
@@ -1102,7 +1052,9 @@ class QuicServerSession {
         return;
       }
       _deriveInitialKeysFromFirstPacket(pkt);
-      return;
+
+      // Also update after the very first Initial
+      _maybeUpdatePeerCidFromPacket(pkt);
     }
 
     if (packetLevel == EncryptionLevel.handshake && handshakeRead == null) {
@@ -1120,6 +1072,54 @@ class QuicServerSession {
     final ackEliciting = _parsePayload(decrypted.plaintext!, packetLevel);
     _onDecryptedPacket(decrypted, packetLevel, ackEliciting);
   }
+
+  Uint8List _dcidForShortHeader() {
+    // Prefer a peer-provided CID if one was ever advertised
+    if (peerScid.isNotEmpty) {
+      return peerScid;
+    }
+
+    // RFC 9000: If peer never provides a CID, continue using ODCID
+    if (clientOrigDcid.isNotEmpty) {
+      return clientOrigDcid;
+    }
+
+    throw StateError('No valid DCID for short-header packet');
+  }
+
+  // void handleDatagram(Uint8List pkt) {
+  //   final packetLevel = detectPacketLevel(pkt);
+  //   print("📥 Server received packet level=$packetLevel len=${pkt.length}");
+
+  //   // ✅ CID learning strictly limited to long-header packets
+  //   if ((pkt[0] & 0x80) != 0 && packetLevel != EncryptionLevel.application) {
+  //     _maybeUpdatePeerCidFromPacket(pkt);
+  //   }
+
+  //   if (!initialKeysReady) {
+  //     if (packetLevel != EncryptionLevel.initial) {
+  //       print("ℹ️ Ignoring non-Initial packet before initial keys are ready");
+  //       return;
+  //     }
+  //     _deriveInitialKeysFromFirstPacket(pkt);
+  //     return;
+  //   }
+
+  //   if (packetLevel == EncryptionLevel.handshake && handshakeRead == null) {
+  //     print("ℹ️ Ignoring early Handshake packet (handshake keys not ready)");
+  //     return;
+  //   }
+
+  //   if (packetLevel == EncryptionLevel.application &&
+  //       !applicationSecretsDerived) {
+  //     print("ℹ️ Ignoring early Application packet (1-RTT keys not ready)");
+  //     return;
+  //   }
+
+  //   final decrypted = decryptPacket(pkt, packetLevel);
+  //   final ackEliciting = _parsePayload(decrypted.plaintext!, packetLevel);
+  //   _onDecryptedPacket(decrypted, packetLevel, ackEliciting);
+  // }
 
   void _maybeHandleClientHello() {
     if (serverFlightSent) return;
