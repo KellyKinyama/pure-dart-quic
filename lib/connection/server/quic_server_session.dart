@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -431,221 +432,6 @@ class QuicServerSession {
       "acked=${ackState.received.toList()..sort()}",
     );
   }
-  // ============================================================
-  // Payload / frame parsing
-  // ============================================================
-
-  // bool _parsePayload(Uint8List plaintext, EncryptionLevel level) {
-  //   print('--- Parsing Decrypted QUIC Payload (server) ---');
-
-  //   final buffer = QuicBuffer(data: plaintext);
-  //   bool ackEliciting = false;
-
-  //   try {
-  //     while (buffer.remaining > 0) {
-  //       final frameType = buffer.pullVarInt();
-
-  //       if (frameType == 0x00) {
-  //         continue;
-  //       }
-
-  //       if (frameType == 0x01) {
-  //         print('✅ Server parsed PING');
-  //         ackEliciting = true;
-  //         continue;
-  //       }
-
-  //       if (frameType == 0x02 || frameType == 0x03) {
-  //         final hasEcn = (frameType & 0x01) == 0x01;
-
-  //         if (buffer.remaining == 0) break;
-  //         final largest = buffer.pullVarInt();
-
-  //         if (buffer.remaining == 0) break;
-  //         final delay = buffer.pullVarInt();
-
-  //         if (buffer.remaining == 0) break;
-  //         final rangeCount = buffer.pullVarInt();
-
-  //         if (buffer.remaining == 0) break;
-  //         final firstRange = buffer.pullVarInt();
-
-  //         for (int i = 0; i < rangeCount; i++) {
-  //           if (buffer.remaining == 0) break;
-  //           buffer.pullVarInt();
-
-  //           if (buffer.remaining == 0) break;
-  //           buffer.pullVarInt();
-  //         }
-
-  //         if (hasEcn) {
-  //           if (buffer.remaining == 0) break;
-  //           buffer.pullVarInt();
-
-  //           if (buffer.remaining == 0) break;
-  //           buffer.pullVarInt();
-
-  //           if (buffer.remaining == 0) break;
-  //           buffer.pullVarInt();
-  //         }
-
-  //         print(
-  //           '✅ Server parsed ACK largest=$largest delay=$delay firstRange=$firstRange',
-  //         );
-  //         continue;
-  //       }
-
-  //       if (frameType == 0x06) {
-  //         if (buffer.remaining == 0) break;
-  //         final offset = buffer.pullVarInt();
-
-  //         if (buffer.remaining == 0) break;
-  //         final length = buffer.pullVarInt();
-
-  //         if (buffer.remaining < length) {
-  //           print(
-  //             '🛑 Server CRYPTO frame truncated: need $length, have ${buffer.remaining}',
-  //           );
-  //           break;
-  //         }
-
-  //         final data = buffer.pullBytes(length);
-
-  //         print('✅ Server parsed CRYPTO frame offset=$offset len=$length');
-  //         ackEliciting = true;
-
-  //         cryptoChunksByLevel[level]![offset] = data;
-  //         final assembled = assembleCryptoStream(level);
-
-  //         if (assembled.isNotEmpty) {
-  //           receivedHandshakeByLevel[level]!.add(assembled);
-
-  //           if (level == EncryptionLevel.initial) {
-  //             _maybeHandleClientHello();
-  //           } else if (level == EncryptionLevel.handshake) {
-  //             _maybeHandleClientFinished();
-  //           }
-  //         }
-  //         continue;
-  //       }
-
-  //       // STREAM frames (0x08..0x0f)
-  //       if ((frameType & 0xF8) == 0x08) {
-  //         final fin = (frameType & 0x01) != 0;
-  //         final hasLen = (frameType & 0x02) != 0;
-  //         final hasOff = (frameType & 0x04) != 0;
-
-  //         if (buffer.remaining == 0) break;
-  //         final streamId = buffer.pullVarInt();
-
-  //         final streamOffset = hasOff ? buffer.pullVarInt() : 0;
-  //         final dataLen = hasLen ? buffer.pullVarInt() : buffer.remaining;
-
-  //         if (buffer.remaining < dataLen) {
-  //           print(
-  //             '🛑 Server STREAM frame truncated: need $dataLen, have ${buffer.remaining}',
-  //           );
-  //           break;
-  //         }
-
-  //         final data = buffer.pullBytes(dataLen);
-
-  //         print(
-  //           '✅ Server parsed STREAM streamId=$streamId '
-  //           'offset=$streamOffset len=$dataLen fin=$fin',
-  //         );
-
-  //         ackEliciting = true;
-
-  //         if (level == EncryptionLevel.application) {
-  //           handleHttp3StreamChunk(streamId, streamOffset, data, fin: fin);
-  //         } else {
-  //           print('ℹ️ Ignoring non-application STREAM frame on level=$level');
-  //         }
-
-  //         continue;
-  //       }
-
-  //       // DATAGRAM frames (0x30, 0x31)
-  //       if (frameType == 0x30 || frameType == 0x31) {
-  //         final hasLen = frameType == 0x31;
-  //         final datagramLen = hasLen ? buffer.pullVarInt() : buffer.remaining;
-
-  //         if (buffer.remaining < datagramLen) {
-  //           print(
-  //             '🛑 Server DATAGRAM frame truncated: need $datagramLen, have ${buffer.remaining}',
-  //           );
-  //           break;
-  //         }
-
-  //         final payload = buffer.pullBytes(datagramLen);
-
-  //         print('✅ Server parsed DATAGRAM len=${payload.length}');
-  //         ackEliciting = true;
-
-  //         if (level == EncryptionLevel.application) {
-  //           handleWebTransportDatagram(payload);
-  //         } else {
-  //           print('ℹ️ Ignoring non-application DATAGRAM frame on level=$level');
-  //         }
-
-  //         continue;
-  //       }
-
-  //       if (frameType == 0x1e) {
-  //         print('✅ Server parsed HANDSHAKE_DONE');
-  //         ackEliciting = true;
-  //         continue;
-  //       }
-
-  //       if (frameType == 0x1c || frameType == 0x1d) {
-  //         if (buffer.remaining == 0) break;
-  //         final errorCode = buffer.pullVarInt();
-
-  //         int? offendingFrameType;
-  //         if (frameType == 0x1c) {
-  //           if (buffer.remaining == 0) break;
-  //           offendingFrameType = buffer.pullVarInt();
-  //         }
-
-  //         if (buffer.remaining == 0) break;
-  //         final reasonLen = buffer.pullVarInt();
-
-  //         if (buffer.remaining < reasonLen) {
-  //           print(
-  //             '🛑 Server CONNECTION_CLOSE reason truncated: need $reasonLen, have ${buffer.remaining}',
-  //           );
-  //           break;
-  //         }
-
-  //         final reasonBytes = reasonLen > 0
-  //             ? buffer.pullBytes(reasonLen)
-  //             : Uint8List(0);
-
-  //         final reason = utf8.decode(reasonBytes, allowMalformed: true);
-
-  //         print(
-  //           '🛑 Server parsed CONNECTION_CLOSE '
-  //           'frameType=0x${frameType.toRadixString(16)} '
-  //           'errorCode=0x${errorCode.toRadixString(16)} '
-  //           '${offendingFrameType != null ? 'offendingFrameType=0x${offendingFrameType.toRadixString(16)} ' : ''}'
-  //           'reason="$reason"',
-  //         );
-  //         break;
-  //       }
-
-  //       print(
-  //         'ℹ️ Server stopping on unsupported frame type 0x${frameType.toRadixString(16)}',
-  //       );
-  //       break;
-  //     }
-  //   } catch (e, st) {
-  //     print('🛑 Server payload parse error: $e\n$st');
-  //   }
-
-  //   print('🎉 Server payload parsing complete.');
-  //   return ackEliciting;
-  // }
 
   void _sendHandshakeDone() {
     if (!applicationSecretsDerived || appWrite == null) {
@@ -1073,20 +859,25 @@ class QuicServerSession {
     _onDecryptedPacket(decrypted, packetLevel, ackEliciting);
   }
 
+  // Uint8List _dcidForShortHeader() {
+  //   // Prefer a peer-provided CID if one was ever advertised
+  //   if (peerScid.isNotEmpty) {
+  //     return peerScid;
+  //   }
+
+  //   // RFC 9000: If peer never provides a CID, continue using ODCID
+  //   if (clientOrigDcid.isNotEmpty) {
+  //     return clientOrigDcid;
+  //   }
+
+  //   throw StateError('No valid DCID for short-header packet');
+  // }
+
   Uint8List _dcidForShortHeader() {
-    // Prefer a peer-provided CID if one was ever advertised
-    if (peerScid.isNotEmpty) {
-      return peerScid;
-    }
-
-    // RFC 9000: If peer never provides a CID, continue using ODCID
-    if (clientOrigDcid.isNotEmpty) {
-      return clientOrigDcid;
-    }
-
-    throw StateError('No valid DCID for short-header packet');
+    // For server → client 1‑RTT packets,
+    // DCID MUST be the CID the client uses to identify this server.
+    return localCid;
   }
-
   // void handleDatagram(Uint8List pkt) {
   //   final packetLevel = detectPacketLevel(pkt);
   //   print("📥 Server received packet level=$packetLevel len=${pkt.length}");
@@ -1437,6 +1228,35 @@ class QuicServerSession {
   bool h3BootstrapComplete = false;
   bool qpackStreamsSent = false;
 
+  void sendQuicPing() {
+    if (!applicationSecretsDerived || appWrite == null) return;
+
+    final pn = _allocateSendPn(EncryptionLevel.application);
+
+    // ✅ PING + padding (guarantees HP sample availability)
+    final payload = Uint8List.fromList([
+      0x01, // PING frame
+      ...List<int>.filled(32, 0x00), // PADDING
+    ]);
+
+    final raw = encryptQuicPacket(
+      'short',
+      payload,
+      appWrite!.key,
+      appWrite!.iv,
+      appWrite!.hp,
+      pn,
+      localCid, // ✅ DCID
+      localCid, // ✅ SCID
+      Uint8List(0),
+    );
+
+    if (raw != null) {
+      socket.send(raw, InternetAddress("127.0.0.1"), peerPort);
+      print('✅ Sent QUIC PING pn=$pn');
+    }
+  }
+
   void _maybeHandleClientFinished() {
     if (clientFinishedVerified) return;
 
@@ -1485,6 +1305,11 @@ class QuicServerSession {
     print("✅ Client Finished verified");
 
     _deriveApplicationSecrets();
+
+    // Timer.periodic(const Duration(milliseconds: 30), (_) {
+    //   sendQuicPing();
+    // });
+
     // _sendHandshakeDone();
 
     // // ✅ Start HTTP/3 / WebTransport immediately after 1-RTT is ready
@@ -1508,6 +1333,10 @@ class QuicServerSession {
     sendMaxData(1024 * 1024);
     sendMaxStreamDataBidi(64 * 1024);
     sendMaxStreamsBidi(100);
+
+    // Timer.periodic(const Duration(milliseconds: 10), (_) {
+    //   sendHttp3SettingsPing();
+    // });
   }
 
   void sendMaxData(int maxBytes) {
@@ -1539,7 +1368,8 @@ class QuicServerSession {
       appWrite!.iv,
       appWrite!.hp,
       pn,
-      clientOrigDcid,
+      // clientOrigDcid,
+      _dcidForShortHeader(),
       localCid,
       Uint8List(0),
     );
@@ -1889,7 +1719,8 @@ class QuicServerSession {
       appWrite!.iv,
       appWrite!.hp,
       pn,
-      peerScid,
+      // peerScid,
+      _dcidForShortHeader(),
       localCid,
       Uint8List(0),
     );

@@ -397,9 +397,9 @@ Uint8List? encryptQuicPacket(
 
   if (logDebug) {
     print("--- encryptQuicPacket keys ---");
-    print('READ.key = ${HEX.encode(writeKey)}');
-    print('READ.iv  = ${HEX.encode(writeIv)}');
-    print('READ.hp  = ${HEX.encode(writeHp)}');
+    print('WRITE.key = ${HEX.encode(writeKey)}');
+    print('WRITE.iv  = ${HEX.encode(writeIv)}');
+    print('WRITE.hp  = ${HEX.encode(writeHp)}');
     print('dcid     = ${HEX.encode(dcid)}');
     print("dcid     = ${HEX.encode(dcid)}");
     print('pkt[0]   = 0x${encodedFrames[0].toRadixString(16).padLeft(2, '0')}');
