@@ -194,6 +194,52 @@ class QuicSession {
   bool webTransportDatagramSent = false;
   int? activeWebTransportSessionId;
 
+  // ---------------------------------------------------------------------------
+  // External application-protocol hooks (modular API). See
+  // QuicServerSession.externalAppProtocol for full semantics.
+  // ---------------------------------------------------------------------------
+  bool externalAppProtocol = false;
+  void Function(int streamId, int offset, Uint8List data, bool fin)?
+  onIncomingStreamData;
+  void Function(Uint8List data)? onIncomingDatagram;
+  void Function()? onApplicationReady;
+  bool _appReadyFired = false;
+
+  /// Public allocator for client-initiated unidirectional streams.
+  int allocateClientUniStreamId() => _allocateClientUniStreamId();
+
+  /// Public allocator for client-initiated bidirectional streams.
+  int allocateClientBidiStreamId() => _allocateClientBidiStreamId();
+
+  /// Send a generic 1-RTT DATAGRAM frame (RFC 9221), payload verbatim.
+  void sendDatagramFrame(
+    Uint8List payload, {
+    InternetAddress? address,
+    int port = 4433,
+  }) {
+    if (!applicationSecretsDerived || appWrite == null) {
+      throw StateError('Cannot send DATAGRAM before 1-RTT keys');
+    }
+    final frame = _buildDatagramFrame(payload, useLengthField: true);
+    final ackState = ackStates[EncryptionLevel.application]!;
+    final pn = ackState.allocatePn();
+    final raw = encryptQuicPacket(
+      'short',
+      frame,
+      appWrite!.key,
+      appWrite!.iv,
+      appWrite!.hp,
+      pn,
+      peerCid ?? dcid,
+      localCid,
+      Uint8List(0),
+    );
+    if (raw == null) {
+      throw StateError('Failed to encrypt DATAGRAM packet');
+    }
+    socket.send(raw, address ?? InternetAddress('127.0.0.1'), port);
+  }
+
   late KeyPair keyPair;
 
   QuicSession(this.dcid, this.socket) {
@@ -1670,12 +1716,17 @@ class QuicSession {
           );
 
           if (level == EncryptionLevel.application) {
-            session.handleHttp3StreamChunk(
-              streamId,
-              streamOffset,
-              data,
-              fin: fin,
-            );
+            if (session.externalAppProtocol &&
+                session.onIncomingStreamData != null) {
+              session.onIncomingStreamData!(streamId, streamOffset, data, fin);
+            } else {
+              session.handleHttp3StreamChunk(
+                streamId,
+                streamOffset,
+                data,
+                fin: fin,
+              );
+            }
           } else {
             print('ℹ️ Ignoring non-application STREAM frame on level=$level');
           }
@@ -1702,7 +1753,12 @@ class QuicSession {
           print('✅ Parsed DATAGRAM len=${payload.length}');
 
           if (level == EncryptionLevel.application) {
-            session.handleWebTransportDatagram(payload);
+            if (session.externalAppProtocol &&
+                session.onIncomingDatagram != null) {
+              session.onIncomingDatagram!(payload);
+            } else {
+              session.handleWebTransportDatagram(payload);
+            }
           } else {
             print('ℹ️ Ignoring non-application DATAGRAM frame on level=$level');
           }
@@ -1734,6 +1790,10 @@ class QuicSession {
         // =========================================================
         if (frameType == 0x1e) {
           print('✅ Parsed HANDSHAKE_DONE');
+          if (session.externalAppProtocol && !session._appReadyFired) {
+            session._appReadyFired = true;
+            session.onApplicationReady?.call();
+          }
           continue;
         }
 
@@ -2782,6 +2842,11 @@ class QuicSession {
       h3.settingsReceived = true;
 
       print('✅ Received HTTP/3 SETTINGS from server: $settings');
+
+      if (externalAppProtocol) {
+        // Modular protocol owns control-stream / WT bootstrap.
+        return;
+      }
 
       // --------------------------------------------------------
       // Real HTTP/3 servers expect the client to open its own
