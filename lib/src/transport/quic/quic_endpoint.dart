@@ -141,6 +141,9 @@ class QuicClientEndpoint {
       address: remoteAddress,
       port: remotePort,
       authority: authority,
+      alpns: alpns.advertisedAlpns.isNotEmpty
+          ? alpns.advertisedAlpns
+          : <String>[chosenAlpn],
     );
 
     return QuicClientEndpoint._(udp, conn, proto).._sub = sub;

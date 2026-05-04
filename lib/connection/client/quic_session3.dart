@@ -108,6 +108,11 @@ class QuicSession {
 
   RawDatagramSocket socket;
 
+  /// Remote endpoint (set by the first [sendClientHello] call). All
+  /// subsequent socket sends use these instead of hardcoded values.
+  InternetAddress remoteAddress = InternetAddress('127.0.0.1');
+  int remotePort = 4433;
+
   // Keys
   QuicKeys? initialRead, initialWrite;
   QuicKeys? handshakeRead, handshakeWrite;
@@ -257,14 +262,17 @@ class QuicSession {
   ClientHello? builtClientHello;
   Uint8List? clientHelloRaw;
 
-  Uint8List buildDynamicClientHello({String authority = 'localhost'}) {
+  Uint8List buildDynamicClientHello({
+    String authority = 'localhost',
+    List<String> alpns = const ['h3'],
+  }) {
     final ch = chb.buildInitialClientHello(
       hostname: authority,
       x25519PublicKey: Uint8List.fromList(
         keyPair.publicKeyBytes, // WRONG if used directly
       ),
       localCid: localCid,
-      alpns: const ['h3'],
+      alpns: alpns,
     );
 
     final wire = ch.serialize();
@@ -368,12 +376,19 @@ class QuicSession {
     required InternetAddress address,
     required int port,
     String authority = 'localhost',
+    List<String> alpns = const ['h3'],
   }) {
     if (initialWrite == null) {
       throw StateError("Initial write keys not available");
     }
 
-    final Uint8List chWire = buildDynamicClientHello(authority: authority);
+    remoteAddress = address;
+    remotePort = port;
+
+    final Uint8List chWire = buildDynamicClientHello(
+      authority: authority,
+      alpns: alpns,
+    );
     clientHelloRaw = chWire;
 
     final cryptoPayload = buildCryptoFrame(chWire);
@@ -389,7 +404,7 @@ class QuicSession {
       minDatagramSize: 1200,
     );
 
-    socket.send(rawPacket, InternetAddress("127.0.0.1"), 4433);
+    socket.send(rawPacket, remoteAddress, remotePort);
 
     print(
       "🚀 Sent Initial ClientHello pn=$pn "
@@ -458,7 +473,7 @@ class QuicSession {
     //     : rawPacket;
     final bytesToSend = rawPacket;
 
-    socket.send(bytesToSend, InternetAddress("127.0.0.1"), 4433);
+    socket.send(bytesToSend, remoteAddress, remotePort);
 
     print(
       "✅ Sent ACK ($level) pn=$pn "
@@ -606,7 +621,7 @@ class QuicSession {
       return;
     }
 
-    socket.send(rawPacket, InternetAddress("127.0.0.1"), 4433);
+    socket.send(rawPacket, remoteAddress, remotePort);
 
     print(
       "✅ Sent Client Finished (Handshake) "
@@ -2036,7 +2051,7 @@ class QuicSession {
 
     final result = decryptPacket(pkt, actualLevel);
 
-    onDecryptedPacket(result, actualLevel, InternetAddress("127.0.0.1"), 4433);
+    onDecryptedPacket(result, actualLevel, remoteAddress, remotePort);
 
     final parsed = parsePayload(result.plaintext!, this, level: actualLevel);
 
@@ -2072,7 +2087,7 @@ class QuicSession {
     }
 
     if (serverFinishedReceived && !clientFinishedSent) {
-      sendClientFinished(address: InternetAddress("127.0.0.1"), port: 4433);
+      sendClientFinished(address: remoteAddress, port: remotePort);
       clientFinishedSent = true;
       print("📤 Client Finished sent");
     }
@@ -2687,7 +2702,7 @@ class QuicSession {
       throw StateError('Failed to encrypt application DATAGRAM packet');
     }
 
-    socket.send(rawPacket, InternetAddress("127.0.0.1"), 4433);
+    socket.send(rawPacket, remoteAddress, remotePort);
 
     print(
       '✅ Sent WebTransport DATAGRAM pn=$pn session=$sessionId len=${data.length}',
@@ -2732,7 +2747,7 @@ class QuicSession {
       throw StateError('Failed to encrypt application STREAM packet');
     }
 
-    socket.send(rawPacket, InternetAddress("127.0.0.1"), 4433);
+    socket.send(rawPacket, remoteAddress, remotePort);
 
     print(
       '✅ Sent application STREAM pn=$pn '

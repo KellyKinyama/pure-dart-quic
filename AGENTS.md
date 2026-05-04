@@ -16,6 +16,12 @@ dart pub get
 dart run bin/server.dart                          # UDP 127.0.0.1:4433
 dart run bin/client.dart
 
+# Other modular protocol demos:
+dart run bin/xmpp_server.dart                     # UDP 127.0.0.1:4435
+dart run bin/xmpp_client.dart
+dart run bin/moq_server.dart                      # UDP 127.0.0.1:4436
+dart run bin/moq_client.dart
+
 # Legacy entry points (kept; same engine)
 dart run lib/connection/server/server2.dart
 dart run lib/connection/client/client3.dart
@@ -45,8 +51,8 @@ lib/
         ├── alpn_registry.dart           # ALPN -> factory
         ├── h3/h3_protocol.dart          # HTTP/3 + WebTransport (drives the QuicConnection API)
         ├── webtransport/                # WebTransport ALPN alias of H3 module
-        ├── xmpp/                        # XMPP-over-QUIC (STUB)
-        ├── media/                       # Media-over-QUIC / MoQ (STUB)
+        ├── xmpp/xmpp_protocol.dart      # XMPP-over-QUIC (length-prefixed stanzas on a single bidi stream)
+        ├── media/media_protocol.dart    # Media-over-QUIC (MoQ-style SETUP/SUBSCRIBE/ANNOUNCE control + DATAGRAM objects)
         └── sip/                         # SIP-over-QUIC (STUB)
 ```
 
@@ -69,12 +75,11 @@ Done (Phases 1–3 of the original TODO):
 
 Still TODO:
 
-5. Wire real ALPN negotiation through [client_hello.dart](lib/handshake/client_hello.dart) / [server_hello.dart](lib/handshake/server_hello.dart) — the modular layer still picks the first registered ALPN as a default; the engine selects ALPN from the ClientHello internally but does not feed the choice back to the modular adapter.
+5. Wire real ALPN negotiation feedback through [server_hello.dart](lib/handshake/server_hello.dart) — the modular layer now plumbs the *advertised* ALPN list into the ClientHello (see `QuicClientEndpoint.connect`) and the server-side `chooseServerAlpn` in [tls_server_builder.dart](lib/handshake/tls_server_builder.dart) accepts `xmpp-quic` and `moq-00`, but the *negotiated* ALPN string still isn't read back from the engine into `QuicConnection.alpn` (the modular adapter labels the connection with whatever the caller passed).
 
-The XMPP / Media / SIP stub modules can now be implemented against the
-fully generic `QuicConnection` (open uni/bidi streams, send/receive
-DATAGRAMs, observe inbound streams). They remain registration-only
-until someone implements their wire formats.
+The XMPP / Media modules now consume only the generic `QuicConnection`
+(open uni/bidi streams, send/receive DATAGRAMs, observe inbound
+streams). SIP remains registration-only.
 
 ## Canonical entry points
 
