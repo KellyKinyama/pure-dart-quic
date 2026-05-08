@@ -404,21 +404,14 @@ class QuicServerSession {
       return;
     }
 
-    // ✅ ALWAYS ACK application packets
-    if (level == EncryptionLevel.application) {
-      sendAck(level: EncryptionLevel.application);
-      return;
-    }
-
-    if (handshakeComplete) {
-      sendAck(level: EncryptionLevel.application);
-      return;
-    }
-
-    if (level == EncryptionLevel.initial ||
-        level == EncryptionLevel.handshake) {
-      sendAck(level: level);
-    }
+    // RFC 9000 §13.2.1: ACKs MUST be sent in packets of the same
+    // encryption level as the packets being acknowledged. If the
+    // server up-levels Handshake ACKs to application packets, the
+    // client never sees its Finished get acked at the handshake
+    // level and retransmits CRYPTO forever (visible in Chrome as
+    // "More than 10000 outstanding ... last_decrypted_packet_level:
+    // ENCRYPTION_HANDSHAKE" or as endless handshake-level PINGs).
+    sendAck(level: level);
   }
 
   int _allocateSendPn(EncryptionLevel level) {
@@ -431,6 +424,21 @@ class QuicServerSession {
     final ackState = ackStates[level];
     if (ackState == null || ackState.received.isEmpty) {
       return;
+    }
+
+    // Cap ACK ranges so the encoded ACK frame can't exceed the
+    // peer's max_udp_payload_size. Without this, every PN ever
+    // received accumulates in `received` and the ACK frame
+    // eventually triggers PROTOCOL_VIOLATION ("Packet too large.")
+    // on Chrome. RFC 9000 §13.2.1 explicitly allows partial ACK
+    // coverage — keep only the most recent packet numbers.
+    const int maxAckEntries = 32;
+    if (ackState.received.length > maxAckEntries) {
+      final sorted = ackState.received.toList()..sort();
+      final keep = sorted.sublist(sorted.length - maxAckEntries);
+      ackState.received
+        ..clear()
+        ..addAll(keep);
     }
 
     final ackFrame = buildAckFromSet(
@@ -942,9 +950,20 @@ class QuicServerSession {
   // }
 
   Uint8List _dcidForShortHeader() {
-    // For server → client 1‑RTT packets,
-    // DCID MUST be the CID the client uses to identify this server.
-    return localCid;
+    // RFC 9000 §17.3 / §5.1: the DCID of a 1-RTT (short-header)
+    // packet sent by the server MUST be a connection ID the *peer*
+    // (the client) chose — i.e. the value that arrived in the SCID
+    // field of the client's first long-header packet, which we
+    // recorded as [peerScid].
+    //
+    // A zero-length [peerScid] is legal: the client opted out of
+    // CID-based demultiplexing and identifies the connection by its
+    // UDP 4-tuple. In that case the short header simply has no CID
+    // bytes after the first byte. Returning [localCid] here makes
+    // Chrome silently drop every 1-RTT packet (including
+    // HANDSHAKE_DONE), and the connection loops on handshake-level
+    // PTO probes.
+    return peerScid;
   }
   // void handleDatagram(Uint8List pkt) {
   //   final packetLevel = detectPacketLevel(pkt);

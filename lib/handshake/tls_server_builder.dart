@@ -51,6 +51,9 @@ const int tpInitialMaxStreamDataUni = 0x0007;
 const int tpInitialMaxStreamsUni = 0x0009;
 const int tpActiveConnectionIdLimit = 0x000e;
 const int tpInitialSourceConnectionId = 0x000f;
+// RFC 9221 — required for QUIC DATAGRAM, which is required for
+// HTTP/3 DATAGRAM (RFC 9297), which is required by WebTransport.
+const int tpMaxDatagramFrameSize = 0x0020;
 // =============================================================
 // Helper types
 // =============================================================
@@ -191,8 +194,13 @@ Uint8List buildQuicTransportParameters({
     // Strongly recommended transport parameters
     // ----------------------------------------------------------
     ..._tp(tpActiveConnectionIdLimit, 4),
-    ..._tp(tpIdleTimeout, 30),
+    ..._tp(tpIdleTimeout, 60000),
     ..._tp(tpMaxUdpPayloadSize, 65527),
+    // Required for WebTransport: enables QUIC DATAGRAM (RFC 9221)
+    // which underlies HTTP/3 DATAGRAM (RFC 9297). Without this TP,
+    // Chrome silently disables WT DATAGRAMs even when the H3
+    // SETTINGS advertise H3_DATAGRAM=1.
+    ..._tp(tpMaxDatagramFrameSize, 65527),
 
     // ----------------------------------------------------------
     // Flow control / stream limits
