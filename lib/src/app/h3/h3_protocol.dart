@@ -28,6 +28,7 @@
 //   * Flow control beyond what QUIC itself provides.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import '../../../h3/h3.dart' as h3;
@@ -48,6 +49,7 @@ const int _wtBidiFrameType = 0x41;
 
 const int _h3FrameSettings = 0x04;
 const int _h3FrameHeaders = 0x01;
+const int _h3FrameData = 0x00;
 
 const Map<String, int> _defaultSettings = <String, int>{
   'SETTINGS_QPACK_MAX_TABLE_CAPACITY': 0,
@@ -92,6 +94,12 @@ class WebTransportSession {
   /// id is also the WebTransport session id used to multiplex
   /// DATAGRAMs (RFC 9297 + draft-ietf-webtrans-http3).
   final int sessionId;
+
+  /// `:path` from the extended CONNECT request that opened this
+  /// session. Empty string if not known (e.g. client-initiated where
+  /// the value wasn't surfaced to the protocol layer).
+  final String path;
+
   final Http3ProtocolBase _owner;
 
   final StreamController<Uint8List> _datagrams = StreamController<Uint8List>();
@@ -104,7 +112,7 @@ class WebTransportSession {
   final Map<int, WebTransportStream> _peerBidiStreams =
       <int, WebTransportStream>{};
 
-  WebTransportSession._(this.sessionId, this._owner);
+  WebTransportSession._(this.sessionId, this._owner, {this.path = ''});
 
   /// Inbound WebTransport DATAGRAMs for this session.
   Stream<Uint8List> get datagrams => _datagrams.stream;
@@ -227,6 +235,11 @@ class _PeerBidiStream {
   // disturbing the H3 chunk map.
   final BytesBuilder _sniffBuffer = BytesBuilder();
 
+  // Server-side body plumbing: when the request handler is dispatched,
+  // the protocol attaches a sink that receives DATA payloads and a
+  // final empty chunk with fin=true once the stream closes.
+  void Function(Uint8List chunk, bool fin)? bodySink;
+
   _PeerBidiStream(this.streamId);
 }
 
@@ -325,6 +338,9 @@ abstract class Http3ProtocolBase implements ApplicationProtocol {
             final session = _wtSessions[s.wtSessionId!];
             session?._closePeerBidiStream(id);
           }
+          // Signal end-of-body to any subscribed request handler.
+          s.bodySink?.call(Uint8List(0), true);
+          s.bodySink = null;
           _peerBidiStreams.remove(id);
         },
       );
@@ -528,6 +544,8 @@ abstract class Http3ProtocolBase implements ApplicationProtocol {
         } catch (e) {
           print('🛑 [h3:$alpn] QPACK decode failed: $e');
         }
+      } else if (type == _h3FrameData) {
+        s.bodySink?.call(payload, false);
       } else {
         print(
           'ℹ️ [h3:$alpn] ignoring request frame '
@@ -535,6 +553,16 @@ abstract class Http3ProtocolBase implements ApplicationProtocol {
         );
       }
     }
+  }
+
+  /// Internal: server-side hook used to attach a request body sink to
+  /// the inbound bidi stream so DATA frames can be reassembled.
+  void attachRequestBodySink(
+    int streamId,
+    void Function(Uint8List chunk, bool fin) sink,
+  ) {
+    final s = _peerBidiStreams[streamId];
+    if (s != null) s.bodySink = sink;
   }
 
   /// Subclass hook for incoming HTTP/3 request HEADERS.
@@ -571,10 +599,10 @@ abstract class Http3ProtocolBase implements ApplicationProtocol {
   // WebTransport session management
   // ---------------------------------------------------------------
 
-  WebTransportSession registerWtSession(int sessionId) {
+  WebTransportSession registerWtSession(int sessionId, {String path = ''}) {
     final existing = _wtSessions[sessionId];
     if (existing != null) return existing;
-    final s = WebTransportSession._(sessionId, this);
+    final s = WebTransportSession._(sessionId, this, path: path);
     _wtSessions[sessionId] = s;
     _wtSessionsCtrl.add(s);
     return s;
@@ -587,8 +615,89 @@ abstract class Http3ProtocolBase implements ApplicationProtocol {
 // Server-side specialisation
 // ---------------------------------------------------------------
 
+/// One inbound HTTP/3 request handed to a [Http3ServerProtocol]
+/// request handler. Use [respond] to send the response (HEADERS +
+/// optional DATA + FIN) on the same stream.
+class Http3Request {
+  /// `:method` pseudo-header (e.g. `GET`).
+  final String method;
+
+  /// `:path` pseudo-header (e.g. `/index.html`).
+  final String path;
+
+  /// `:scheme` pseudo-header (typically `https`).
+  final String scheme;
+
+  /// `:authority` pseudo-header (host:port).
+  final String authority;
+
+  /// All received request headers (including pseudo-headers).
+  final Map<String, String> headers;
+
+  /// Underlying QUIC request stream.
+  final QuicStream stream;
+
+  /// QUIC stream id (== [stream].id).
+  final int streamId;
+
+  /// Future that completes with the full request body once the peer
+  /// FINs the stream. Empty for bodyless requests.
+  final Future<Uint8List> body;
+
+  bool _responded = false;
+
+  Http3Request._({
+    required this.method,
+    required this.path,
+    required this.scheme,
+    required this.authority,
+    required this.headers,
+    required this.stream,
+    required this.streamId,
+    required this.body,
+  });
+
+  /// Write a response: HEADERS frame (with `:status` + extra headers)
+  /// followed by an optional DATA frame, then FIN the stream.
+  /// Idempotent; subsequent calls are ignored.
+  void respond(
+    int status, {
+    Map<String, String> headers = const <String, String>{},
+    Uint8List? body,
+  }) {
+    if (_responded) return;
+    _responded = true;
+    final fields = <String, String>{':status': status.toString(), ...headers};
+    final headerBlock = h3.build_http3_literal_headers_frame(fields);
+    final frames = <Map<String, dynamic>>[
+      <String, dynamic>{'frame_type': _h3FrameHeaders, 'payload': headerBlock},
+      if (body != null && body.isNotEmpty)
+        <String, dynamic>{'frame_type': _h3FrameData, 'payload': body},
+    ];
+    final framed = h3.build_h3_frames(frames);
+    stream.write(framed, fin: true);
+  }
+}
+
+/// Signature for an HTTP/3 application request handler.
+typedef Http3RequestHandler = void Function(Http3Request request);
+
 class Http3ServerProtocol extends Http3ProtocolBase {
   Http3ServerProtocol(super.conn, [super.alpn = h3Alpn]);
+
+  /// Optional application request handler. Invoked for every inbound
+  /// HTTP/3 request that is **not** a WebTransport CONNECT (those are
+  /// routed via [webTransportAcceptor] / [webTransportSessions]).
+  /// If null, non-WT requests get a 404.
+  Http3RequestHandler? requestHandler;
+
+  /// Optional WT CONNECT acceptor. Receives the request `:path` and
+  /// returns true to accept (200 + session opened) or false to reject
+  /// (404 + FIN). If null, all WT CONNECTs are accepted (legacy
+  /// behaviour) so that listeners on [webTransportSessions] still see
+  /// every incoming session.
+  bool Function(String path)? webTransportAcceptor;
+
   @override
   void onRequestHeaders(
     QuicStream stream,
@@ -605,6 +714,21 @@ class Http3ServerProtocol extends Http3ProtocolBase {
     );
 
     if (method == 'CONNECT' && protocol == 'webtransport') {
+      final acceptor = webTransportAcceptor;
+      final accept = acceptor == null ? true : acceptor(path ?? '/');
+      if (!accept) {
+        final block = h3.build_http3_literal_headers_frame(<String, String>{
+          ':status': '404',
+        });
+        stream.write(
+          h3.build_h3_frames(<Map<String, dynamic>>[
+            <String, dynamic>{'frame_type': _h3FrameHeaders, 'payload': block},
+          ]),
+          fin: true,
+        );
+        print('⛔ [h3:$alpn] rejected WT session path=$path');
+        return;
+      }
       // draft-ietf-webtrans-http3: accept the session.
       final responseHeaderBlock = h3.build_http3_literal_headers_frame(
         <String, String>{
@@ -620,20 +744,56 @@ class Http3ServerProtocol extends Http3ProtocolBase {
       ]);
       stream.write(framed);
       print('✅ [h3:$alpn] accepted WT session on stream $streamId');
-      registerWtSession(streamId);
-    } else {
-      // Generic 404 for anything else.
-      final responseHeaderBlock = h3.build_http3_literal_headers_frame(
-        <String, String>{':status': '404'},
-      );
-      final framed = h3.build_h3_frames(<Map<String, dynamic>>[
-        <String, dynamic>{
-          'frame_type': _h3FrameHeaders,
-          'payload': responseHeaderBlock,
-        },
-      ]);
-      stream.write(framed, fin: true);
+      registerWtSession(streamId, path: path ?? '/');
+      return;
     }
+
+    final handler = requestHandler;
+    if (handler != null) {
+      final bodyBuf = BytesBuilder();
+      final bodyCompleter = Completer<Uint8List>();
+      attachRequestBodySink(streamId, (chunk, fin) {
+        if (chunk.isNotEmpty) bodyBuf.add(chunk);
+        if (fin && !bodyCompleter.isCompleted) {
+          bodyCompleter.complete(bodyBuf.toBytes());
+        }
+      });
+      final req = Http3Request._(
+        method: method ?? '',
+        path: path ?? '/',
+        scheme: headers[':scheme'] ?? 'https',
+        authority: headers[':authority'] ?? '',
+        headers: headers,
+        stream: stream,
+        streamId: streamId,
+        body: bodyCompleter.future,
+      );
+      try {
+        handler(req);
+      } catch (e, st) {
+        print('🛑 [h3:$alpn] requestHandler threw: $e\n$st');
+        if (!req._responded) {
+          req.respond(
+            500,
+            headers: const <String, String>{'content-type': 'text/plain'},
+            body: Uint8List.fromList(utf8.encode('Internal Server Error')),
+          );
+        }
+      }
+      return;
+    }
+
+    // Default: 404 with no body.
+    final responseHeaderBlock = h3.build_http3_literal_headers_frame(
+      <String, String>{':status': '404'},
+    );
+    final framed = h3.build_h3_frames(<Map<String, dynamic>>[
+      <String, dynamic>{
+        'frame_type': _h3FrameHeaders,
+        'payload': responseHeaderBlock,
+      },
+    ]);
+    stream.write(framed, fin: true);
   }
 }
 
@@ -654,26 +814,158 @@ class Http3ServerProtocolFactory implements ApplicationProtocolFactory {
 // Client-side specialisation
 // ---------------------------------------------------------------
 
+/// One inbound HTTP/3 response collected by [Http3ClientProtocol.request].
+class Http3Response {
+  /// `:status` parsed as an integer (0 if missing/unparseable).
+  final int status;
+
+  /// All received response headers (including `:status`).
+  final Map<String, String> headers;
+
+  /// Aggregated body bytes from all DATA frames.
+  final Uint8List body;
+
+  Http3Response._({
+    required this.status,
+    required this.headers,
+    required this.body,
+  });
+
+  /// Body decoded as UTF-8.
+  String get bodyAsString => utf8.decode(body, allowMalformed: true);
+}
+
 class Http3ClientProtocol extends Http3ProtocolBase {
-  /// `:authority` pseudo-header used when this client opens the
-  /// extended CONNECT for WebTransport.
+  /// `:authority` pseudo-header used when this client opens HTTP/3
+  /// requests or the extended CONNECT for WebTransport.
   String authority;
+
+  /// Path used by the auto-issued WebTransport CONNECT.
   String wtPath;
+
+  /// If true (default), automatically send a WebTransport CONNECT once
+  /// peer SETTINGS advertise WT support. Set to false for plain HTTP/3
+  /// clients that only want to use [request] / [get].
+  bool autoConnectWebTransport;
+
   bool _wtConnectSent = false;
 
   Http3ClientProtocol(
     QuicConnection conn, {
     this.authority = 'localhost',
     this.wtPath = '/wt',
+    this.autoConnectWebTransport = true,
     String alpn = h3Alpn,
   }) : super(conn, alpn);
 
   @override
   void onPeerSettings(Map<String, int> settings) {
+    if (!autoConnectWebTransport) return;
     if (_wtConnectSent) return;
     if ((settings['SETTINGS_ENABLE_WEBTRANSPORT'] ?? 0) != 1) return;
     _wtConnectSent = true;
     _openWebTransportConnect();
+  }
+
+  /// Convenience wrapper for `request('GET', path, ...)`.
+  Future<Http3Response> get(
+    String path, {
+    Map<String, String> headers = const <String, String>{},
+  }) => request('GET', path, headers: headers);
+
+  /// Issue a one-shot HTTP/3 request on a fresh client-initiated bidi
+  /// stream. Sends HEADERS (+ optional DATA) with FIN, then collects
+  /// the response (HEADERS + any DATA frames) until the server FINs
+  /// the stream. The returned future completes when the response
+  /// stream closes.
+  Future<Http3Response> request(
+    String method,
+    String path, {
+    Map<String, String> headers = const <String, String>{},
+    Uint8List? body,
+  }) async {
+    final stream = await conn.openBidirectionalStream();
+    final reqHeaders = <String, String>{
+      ':method': method,
+      ':scheme': 'https',
+      ':authority': authority,
+      ':path': path,
+      ...headers,
+    };
+    final headerBlock = h3.build_http3_literal_headers_frame(reqHeaders);
+    final outFrames = <Map<String, dynamic>>[
+      <String, dynamic>{'frame_type': _h3FrameHeaders, 'payload': headerBlock},
+      if (body != null && body.isNotEmpty)
+        <String, dynamic>{'frame_type': _h3FrameData, 'payload': body},
+    ];
+    stream.write(h3.build_h3_frames(outFrames), fin: true);
+    print(
+      '🚀 [h3:$alpn] sent request streamId=${stream.id} '
+      ':method=$method :path=$path',
+    );
+
+    final completer = Completer<Http3Response>();
+    final chunks = <int, Uint8List>{};
+    var offset = 0;
+    var readOffset = 0;
+    Map<String, String>? respHeaders;
+    final bodyBuf = BytesBuilder();
+
+    late StreamSubscription<Uint8List> sub;
+    void finish() {
+      if (completer.isCompleted) return;
+      final h = respHeaders ?? <String, String>{};
+      final status = int.tryParse(h[':status'] ?? '') ?? 0;
+      completer.complete(
+        Http3Response._(status: status, headers: h, body: bodyBuf.toBytes()),
+      );
+    }
+
+    sub = stream.incoming.listen(
+      (chunk) {
+        chunks[offset] = chunk;
+        offset += chunk.length;
+        final extracted = h3.extract_h3_frames_from_chunks(chunks, readOffset);
+        final frames = extracted['frames'] as List<dynamic>;
+        readOffset = extracted['new_from_offset'] as int;
+        for (final f in frames) {
+          final m = f as Map<String, dynamic>;
+          final type = m['frame_type'] as int;
+          final payload = m['payload'] as Uint8List;
+          if (type == _h3FrameHeaders) {
+            try {
+              final fields = h3.decode_qpack_header_fields(payload);
+              respHeaders = <String, String>{
+                for (final f in fields) f.name: f.value,
+              };
+              print(
+                '✅ [h3:$alpn] response streamId=${stream.id} '
+                ':status=${respHeaders![':status']}',
+              );
+            } catch (e) {
+              print('🛑 [h3:$alpn] QPACK decode failed: $e');
+            }
+          } else if (type == _h3FrameData) {
+            bodyBuf.add(payload);
+          } else {
+            print(
+              'ℹ️ [h3:$alpn] ignoring response frame '
+              'type=0x${type.toRadixString(16)} len=${payload.length}',
+            );
+          }
+        }
+      },
+      onDone: () {
+        finish();
+        sub.cancel();
+      },
+      onError: (Object e, StackTrace st) {
+        if (!completer.isCompleted) completer.completeError(e, st);
+      },
+      cancelOnError: true,
+    );
+
+    return completer.future;
   }
 
   Future<void> _openWebTransportConnect() async {
