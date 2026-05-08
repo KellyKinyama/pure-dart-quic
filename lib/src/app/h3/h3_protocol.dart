@@ -41,6 +41,10 @@ const int _h3StreamTypeControl = 0x00;
 const int _h3StreamTypeQpackEncoder = 0x02;
 const int _h3StreamTypeQpackDecoder = 0x03;
 const int _wtStreamTypeUni = 0x54;
+// WebTransport bidirectional stream prefix (draft-ietf-webtrans-http3-02
+// §4.2): the first bytes of a WT bidi stream are
+// varint(0x41) varint(sessionId) followed by opaque application bytes.
+const int _wtBidiFrameType = 0x41;
 
 const int _h3FrameSettings = 0x04;
 const int _h3FrameHeaders = 0x01;
@@ -53,6 +57,34 @@ const Map<String, int> _defaultSettings = <String, int>{
   'SETTINGS_H3_DATAGRAM': 1,
 };
 
+/// One unidirectional WebTransport stream. Wraps the underlying
+/// QUIC stream and exposes it to application code without the
+/// `varint(0x54) varint(sessionId)` framing prefix.
+class WebTransportStream {
+  final int streamId;
+  final QuicStream _quicStream;
+  final StreamController<Uint8List> _incomingCtrl =
+      StreamController<Uint8List>();
+
+  WebTransportStream._(this.streamId, this._quicStream);
+
+  /// Application-level payload bytes (no WT framing).
+  Stream<Uint8List> get incoming => _incomingCtrl.stream;
+
+  /// Write opaque bytes onto the underlying QUIC stream.
+  void write(Uint8List data, {bool fin = false}) {
+    _quicStream.write(data, fin: fin);
+  }
+
+  void _deliver(Uint8List chunk) {
+    if (chunk.isNotEmpty) _incomingCtrl.add(chunk);
+  }
+
+  void _close() {
+    if (!_incomingCtrl.isClosed) _incomingCtrl.close();
+  }
+}
+
 /// Application handle for a WebTransport session established over an
 /// extended-CONNECT request stream.
 class WebTransportSession {
@@ -63,11 +95,27 @@ class WebTransportSession {
   final Http3ProtocolBase _owner;
 
   final StreamController<Uint8List> _datagrams = StreamController<Uint8List>();
+  final StreamController<WebTransportStream> _incomingUniCtrl =
+      StreamController<WebTransportStream>.broadcast();
+  final StreamController<WebTransportStream> _incomingBidiCtrl =
+      StreamController<WebTransportStream>.broadcast();
+  final Map<int, WebTransportStream> _peerUniStreams =
+      <int, WebTransportStream>{};
+  final Map<int, WebTransportStream> _peerBidiStreams =
+      <int, WebTransportStream>{};
 
   WebTransportSession._(this.sessionId, this._owner);
 
   /// Inbound WebTransport DATAGRAMs for this session.
   Stream<Uint8List> get datagrams => _datagrams.stream;
+
+  /// Inbound peer-initiated WebTransport unidirectional streams.
+  Stream<WebTransportStream> get incomingUnidirectionalStreams =>
+      _incomingUniCtrl.stream;
+
+  /// Inbound peer-initiated WebTransport bidirectional streams.
+  Stream<WebTransportStream> get incomingBidirectionalStreams =>
+      _incomingBidiCtrl.stream;
 
   /// Send a WebTransport DATAGRAM (RFC 9297 wire format:
   /// varint session_id || payload).
@@ -79,12 +127,76 @@ class WebTransportSession {
     _owner.conn.sendDatagram(framed);
   }
 
+  /// Open a new WebTransport unidirectional stream toward the peer.
+  /// Writes the `varint(0x54) varint(sessionId)` framing prefix; the
+  /// returned [WebTransportStream.write] appends opaque bytes after it.
+  Future<WebTransportStream> openUnidirectionalStream() async {
+    final qs = await _owner.conn.openUnidirectionalStream();
+    final prefix = Uint8List.fromList(<int>[
+      ...writeVarInt(_wtStreamTypeUni),
+      ...writeVarInt(sessionId),
+    ]);
+    qs.write(prefix);
+    return WebTransportStream._(qs.id, qs);
+  }
+
+  /// Open a new WebTransport bidirectional stream toward the peer.
+  /// Writes the `varint(0x41) varint(sessionId)` (WEBTRANSPORT_STREAM)
+  /// prefix; the rest of the stream is opaque application bytes.
+  Future<WebTransportStream> openBidirectionalStream() async {
+    final qs = await _owner.conn.openBidirectionalStream();
+    final prefix = Uint8List.fromList(<int>[
+      ...writeVarInt(_wtBidiFrameType),
+      ...writeVarInt(sessionId),
+    ]);
+    qs.write(prefix);
+    return WebTransportStream._(qs.id, qs);
+  }
+
   void _deliverDatagram(Uint8List payload) {
     _datagrams.add(payload);
   }
 
+  WebTransportStream _registerPeerUniStream(int streamId, QuicStream qs) {
+    final existing = _peerUniStreams[streamId];
+    if (existing != null) return existing;
+    final wts = WebTransportStream._(streamId, qs);
+    _peerUniStreams[streamId] = wts;
+    _incomingUniCtrl.add(wts);
+    return wts;
+  }
+
+  void _closePeerUniStream(int streamId) {
+    final s = _peerUniStreams.remove(streamId);
+    s?._close();
+  }
+
+  WebTransportStream _registerPeerBidiStream(int streamId, QuicStream qs) {
+    final existing = _peerBidiStreams[streamId];
+    if (existing != null) return existing;
+    final wts = WebTransportStream._(streamId, qs);
+    _peerBidiStreams[streamId] = wts;
+    _incomingBidiCtrl.add(wts);
+    return wts;
+  }
+
+  void _closePeerBidiStream(int streamId) {
+    final s = _peerBidiStreams.remove(streamId);
+    s?._close();
+  }
+
   Future<void> close() async {
+    for (final s in _peerUniStreams.values) {
+      s._close();
+    }
+    _peerUniStreams.clear();
+    for (final s in _peerBidiStreams.values) {
+      s._close();
+    }
+    _peerBidiStreams.clear();
     await _datagrams.close();
+    await _incomingUniCtrl.close();
+    await _incomingBidiCtrl.close();
   }
 }
 
@@ -92,6 +204,10 @@ class _PeerUniStream {
   final int streamId;
   final BytesBuilder buffer = BytesBuilder();
   int? streamType;
+  // For type=0x54 WebTransport uni streams, the session id varint
+  // immediately follows the type prefix.
+  int? wtSessionId;
+  WebTransportStream? wtStream;
 
   _PeerUniStream(this.streamId);
 }
@@ -101,6 +217,15 @@ class _PeerBidiStream {
   final Map<int, Uint8List> chunks = <int, Uint8List>{};
   int readOffset = 0;
   int incomingOffset = 0;
+
+  // null = haven't decided yet, 'h3' = HTTP/3 request, 'wt' = WebTransport bidi.
+  String? mode;
+  // For 'wt' mode only.
+  int? wtSessionId;
+  WebTransportStream? wtStream;
+  // Used while mode is undecided so we can sniff the prefix without
+  // disturbing the H3 chunk map.
+  final BytesBuilder _sniffBuffer = BytesBuilder();
 
   _PeerBidiStream(this.streamId);
 }
@@ -180,20 +305,33 @@ abstract class Http3ProtocolBase implements ApplicationProtocol {
       final s = _PeerUniStream(id);
       _peerUniStreams[id] = s;
       stream.incoming.listen(
-        (chunk) => _onPeerUniChunk(s, chunk),
-        onDone: () => _peerUniStreams.remove(id),
+        (chunk) => _onPeerUniChunk(stream, s, chunk),
+        onDone: () {
+          // Notify any WT uni stream consumer that the peer FIN'd.
+          if (s.wtStream != null && s.wtSessionId != null) {
+            final session = _wtSessions[s.wtSessionId!];
+            session?._closePeerUniStream(id);
+          }
+          _peerUniStreams.remove(id);
+        },
       );
     } else {
       final s = _PeerBidiStream(id);
       _peerBidiStreams[id] = s;
       stream.incoming.listen(
         (chunk) => _onPeerBidiChunk(stream, s, chunk),
-        onDone: () => _peerBidiStreams.remove(id),
+        onDone: () {
+          if (s.mode == 'wt' && s.wtSessionId != null) {
+            final session = _wtSessions[s.wtSessionId!];
+            session?._closePeerBidiStream(id);
+          }
+          _peerBidiStreams.remove(id);
+        },
       );
     }
   }
 
-  void _onPeerUniChunk(_PeerUniStream s, Uint8List chunk) {
+  void _onPeerUniChunk(QuicStream stream, _PeerUniStream s, Uint8List chunk) {
     s.buffer.add(chunk);
     var view = s.buffer.toBytes();
 
@@ -224,12 +362,52 @@ abstract class Http3ProtocolBase implements ApplicationProtocol {
         s.buffer.clear();
         break;
       case _wtStreamTypeUni:
-        // Opaque WebTransport unidirectional stream. Surface as a
-        // raw chunk on the corresponding session if one exists.
-        s.buffer.clear();
+        _consumeWtUniBytes(stream, s);
         break;
       default:
         s.buffer.clear();
+    }
+  }
+
+  void _consumeWtUniBytes(QuicStream stream, _PeerUniStream s) {
+    // Step 2 (once): read the WT session id varint that follows the
+    // 0x54 stream-type prefix.
+    if (s.wtSessionId == null) {
+      final view = s.buffer.toBytes();
+      final dynamic res = readVarInt(view, 0);
+      if (res == null) return; // need more bytes
+      s.wtSessionId = res.value as int;
+      final prefixLen = res.byteLength as int;
+      final remaining = Uint8List.sublistView(view, prefixLen);
+      s.buffer
+        ..clear()
+        ..add(remaining);
+      final session = _wtSessions[s.wtSessionId!];
+      if (session == null) {
+        print(
+          '⚠️ [h3:$alpn] WT uni stream ${s.streamId} for unknown '
+          'session ${s.wtSessionId}',
+        );
+        s.buffer.clear();
+        return;
+      }
+      s.wtStream = session._registerPeerUniStream(s.streamId, stream);
+      print(
+        '📥 [h3:$alpn] WT uni stream ${s.streamId} '
+        'attached to session ${s.wtSessionId}',
+      );
+    }
+
+    // Step 3: forward any buffered (and future) opaque bytes.
+    final wts = s.wtStream;
+    if (wts == null) {
+      s.buffer.clear();
+      return;
+    }
+    final pending = s.buffer.toBytes();
+    if (pending.isNotEmpty) {
+      wts._deliver(Uint8List.fromList(pending));
+      s.buffer.clear();
     }
   }
 
@@ -270,8 +448,68 @@ abstract class Http3ProtocolBase implements ApplicationProtocol {
   void onPeerSettings(Map<String, int> settings) {}
 
   void _onPeerBidiChunk(QuicStream stream, _PeerBidiStream s, Uint8List chunk) {
+    // Decide stream mode on first bytes: WT bidi streams start with
+    // varint(0x41) varint(sessionId); H3 request streams start with
+    // any other frame type (typically HEADERS = 0x01).
+    if (s.mode == null) {
+      s._sniffBuffer.add(chunk);
+      final view = s._sniffBuffer.toBytes();
+      final dynamic firstVi = readVarInt(view, 0);
+      if (firstVi == null) return; // need more bytes
+      final firstType = firstVi.value as int;
+      if (firstType == _wtBidiFrameType) {
+        final dynamic sidVi = readVarInt(view, firstVi.byteLength as int);
+        if (sidVi == null) return; // need more bytes
+        final consumed =
+            (firstVi.byteLength as int) + (sidVi.byteLength as int);
+        s.mode = 'wt';
+        s.wtSessionId = sidVi.value as int;
+        final session = _wtSessions[s.wtSessionId!];
+        if (session == null) {
+          print(
+            '⚠️ [h3:$alpn] WT bidi stream ${s.streamId} for unknown '
+            'session ${s.wtSessionId}',
+          );
+          s._sniffBuffer.clear();
+          return;
+        }
+        s.wtStream = session._registerPeerBidiStream(s.streamId, stream);
+        print(
+          '📥 [h3:$alpn] WT bidi stream ${s.streamId} '
+          'attached to session ${s.wtSessionId}',
+        );
+        // Forward any application bytes that arrived after the prefix.
+        final remaining = Uint8List.sublistView(view, consumed);
+        s._sniffBuffer.clear();
+        if (remaining.isNotEmpty) {
+          s.wtStream!._deliver(Uint8List.fromList(remaining));
+        }
+        return;
+      } else {
+        s.mode = 'h3';
+        // Replay sniffed bytes into the H3 chunk map at offset 0.
+        s.chunks[0] = view;
+        s.incomingOffset = view.length;
+        s._sniffBuffer.clear();
+        _consumeH3BidiBytes(stream, s);
+        return;
+      }
+    }
+
+    if (s.mode == 'wt') {
+      final wts = s.wtStream;
+      if (wts == null) return;
+      wts._deliver(chunk);
+      return;
+    }
+
+    // H3 request stream path.
     s.chunks[s.incomingOffset] = chunk;
     s.incomingOffset += chunk.length;
+    _consumeH3BidiBytes(stream, s);
+  }
+
+  void _consumeH3BidiBytes(QuicStream stream, _PeerBidiStream s) {
     final extracted = h3.extract_h3_frames_from_chunks(s.chunks, s.readOffset);
     final frames = extracted['frames'] as List<dynamic>;
     s.readOffset = extracted['new_from_offset'] as int;
