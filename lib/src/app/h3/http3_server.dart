@@ -29,6 +29,12 @@ import 'h3_protocol.dart';
 /// Application-supplied HTTP/3 request handler.
 typedef Http3AppHandler = FutureOr<void> Function(Http3Request request);
 
+/// Application-supplied WebTransport session handler. The session has
+/// already been accepted (200) when this fires; the captured route
+/// parameters are available via [WebTransportSessionApp.params].
+typedef WebTransportHandler =
+    FutureOr<void> Function(WebTransportSession session);
+
 class _Route {
   final String method; // upper-case, '*' = any
   final List<String> segments; // path split on '/', empty for root
@@ -59,10 +65,38 @@ class _Route {
   }
 }
 
+class _WtRoute {
+  final List<String> segments;
+  final WebTransportHandler handler;
+  final bool wildcard;
+
+  _WtRoute(this.segments, this.handler, this.wildcard);
+
+  Map<String, String>? match(List<String> reqSegments) {
+    if (!wildcard && segments.length != reqSegments.length) return null;
+    if (wildcard && reqSegments.length < segments.length - 1) return null;
+    final params = <String, String>{};
+    for (var i = 0; i < segments.length; i++) {
+      final seg = segments[i];
+      if (seg == '*') {
+        params['*'] = reqSegments.skip(i).join('/');
+        return params;
+      }
+      if (seg.startsWith(':')) {
+        params[seg.substring(1)] = reqSegments[i];
+        continue;
+      }
+      if (seg != reqSegments[i]) return null;
+    }
+    return params;
+  }
+}
+
 /// A high-level HTTP/3 server. Applications register routes and call
 /// [bind]; everything QUIC-related is handled internally.
 class Http3Server {
   final List<_Route> _routes = <_Route>[];
+  final List<_WtRoute> _wtRoutes = <_WtRoute>[];
   Http3AppHandler _fallback = _defaultNotFound;
 
   QuicServerEndpoint? _endpoint;
@@ -88,6 +122,17 @@ class Http3Server {
 
   /// Match any HTTP method for [path].
   void any(String path, Http3AppHandler handler) => _add('*', path, handler);
+
+  /// Register a WebTransport route. Incoming `CONNECT :protocol=webtransport`
+  /// requests whose `:path` matches are accepted and the [handler] is
+  /// invoked with the live [WebTransportSession]. Path parameters are
+  /// available via the [WebTransportSessionApp.params] extension.
+  /// Unmatched WT CONNECTs are rejected with 404.
+  void webtransport(String path, WebTransportHandler handler) {
+    final segments = _splitPath(path);
+    final wildcard = segments.isNotEmpty && segments.last == '*';
+    _wtRoutes.add(_WtRoute(segments, handler, wildcard));
+  }
 
   /// Catch-all for requests that no route matched. Default: 404.
   set fallback(Http3AppHandler handler) => _fallback = handler;
@@ -129,6 +174,10 @@ class Http3Server {
       final proto = ep.protocol;
       if (proto is Http3ServerProtocol) {
         proto.requestHandler = _dispatch;
+        if (_wtRoutes.isNotEmpty) {
+          proto.webTransportAcceptor = _acceptWt;
+          proto.webTransportSessions.listen(_dispatchWt);
+        }
       }
     });
   }
@@ -159,6 +208,36 @@ class Http3Server {
       }
     }
     _invoke(_fallback, req);
+  }
+
+  bool _acceptWt(String path) {
+    final segs = _splitPath(_pathOnly(path));
+    for (final r in _wtRoutes) {
+      if (r.match(segs) != null) return true;
+    }
+    return false;
+  }
+
+  void _dispatchWt(WebTransportSession session) {
+    final segs = _splitPath(_pathOnly(session.path));
+    for (final r in _wtRoutes) {
+      final params = r.match(segs);
+      if (params != null) {
+        _wtParamsExpando[session] = params;
+        try {
+          final res = r.handler(session);
+          if (res is Future) {
+            res.catchError((Object e, StackTrace st) {
+              print('🛑 [http3.wt] handler threw: $e\n$st');
+            });
+          }
+        } catch (e, st) {
+          print('🛑 [http3.wt] handler threw: $e\n$st');
+        }
+        return;
+      }
+    }
+    // Should not happen because acceptor already filtered.
   }
 
   static String _pathOnly(String p) {
@@ -211,6 +290,8 @@ void _defaultNotFound(Http3Request req) {
 
 final Expando<Map<String, String>> _paramsExpando =
     Expando<Map<String, String>>('http3.params');
+final Expando<Map<String, String>> _wtParamsExpando =
+    Expando<Map<String, String>>('http3.wt.params');
 
 class _Http3RequestExt {
   final Http3Request _req;
@@ -267,4 +348,43 @@ extension Http3RequestApp on Http3Request {
     };
     respond(status, headers: h, body: Uint8List.fromList(utf8.encode(html)));
   }
+}
+
+/// Application-side helpers on a [WebTransportSession]. Exposes the
+/// captured route params and convenience helpers around the raw
+/// `incomingUnidirectionalStreams` / `incomingBidirectionalStreams`
+/// streams.
+extension WebTransportSessionApp on WebTransportSession {
+  /// Captured `:name` and `*` route parameters from the matched
+  /// [Http3Server.webtransport] / [WebTransportServer.route] entry.
+  Map<String, String> get params =>
+      _wtParamsExpando[this] ?? const <String, String>{};
+}
+
+/// A high-level WebTransport-only server. Equivalent to using
+/// [Http3Server] with only [Http3Server.webtransport] routes; offered
+/// as a separate type for apps that don't need plain HTTP/3.
+///
+/// Example:
+/// ```dart
+/// final wt = WebTransportServer();
+/// wt.route('/echo', (s) {
+///   s.datagrams.listen(s.sendDatagram);
+/// });
+/// await wt.bind('127.0.0.1', 4433);
+/// ```
+class WebTransportServer {
+  final Http3Server _inner = Http3Server();
+
+  /// Register a WebTransport route. Same path syntax as
+  /// [Http3Server.webtransport] (`:param`, `*` tail wildcard).
+  void route(String path, WebTransportHandler handler) =>
+      _inner.webtransport(path, handler);
+
+  Future<void> bind(dynamic address, int port) => _inner.bind(address, port);
+
+  Future<void> close() => _inner.close();
+
+  InternetAddress? get address => _inner.address;
+  int? get port => _inner.port;
 }

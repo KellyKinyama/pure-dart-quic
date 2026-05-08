@@ -36,6 +36,8 @@ Future<void> main(List<String> args) async {
 
   final proto = ep.protocol;
   if (proto is Http3ClientProtocol) {
+    // Match a WT route the demo server exposes (`/echo`).
+    proto.wtPath = '/echo';
     // ----- 1) Plain HTTP/3 requests --------------------------------
     Future<void> fetch(String path) async {
       try {

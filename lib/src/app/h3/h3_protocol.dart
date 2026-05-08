@@ -94,6 +94,12 @@ class WebTransportSession {
   /// id is also the WebTransport session id used to multiplex
   /// DATAGRAMs (RFC 9297 + draft-ietf-webtrans-http3).
   final int sessionId;
+
+  /// `:path` from the extended CONNECT request that opened this
+  /// session. Empty string if not known (e.g. client-initiated where
+  /// the value wasn't surfaced to the protocol layer).
+  final String path;
+
   final Http3ProtocolBase _owner;
 
   final StreamController<Uint8List> _datagrams = StreamController<Uint8List>();
@@ -106,7 +112,7 @@ class WebTransportSession {
   final Map<int, WebTransportStream> _peerBidiStreams =
       <int, WebTransportStream>{};
 
-  WebTransportSession._(this.sessionId, this._owner);
+  WebTransportSession._(this.sessionId, this._owner, {this.path = ''});
 
   /// Inbound WebTransport DATAGRAMs for this session.
   Stream<Uint8List> get datagrams => _datagrams.stream;
@@ -593,10 +599,10 @@ abstract class Http3ProtocolBase implements ApplicationProtocol {
   // WebTransport session management
   // ---------------------------------------------------------------
 
-  WebTransportSession registerWtSession(int sessionId) {
+  WebTransportSession registerWtSession(int sessionId, {String path = ''}) {
     final existing = _wtSessions[sessionId];
     if (existing != null) return existing;
-    final s = WebTransportSession._(sessionId, this);
+    final s = WebTransportSession._(sessionId, this, path: path);
     _wtSessions[sessionId] = s;
     _wtSessionsCtrl.add(s);
     return s;
@@ -681,9 +687,16 @@ class Http3ServerProtocol extends Http3ProtocolBase {
 
   /// Optional application request handler. Invoked for every inbound
   /// HTTP/3 request that is **not** a WebTransport CONNECT (those are
-  /// always handled internally and surfaced via
-  /// [webTransportSessions]). If null, all such requests get a 404.
+  /// routed via [webTransportAcceptor] / [webTransportSessions]).
+  /// If null, non-WT requests get a 404.
   Http3RequestHandler? requestHandler;
+
+  /// Optional WT CONNECT acceptor. Receives the request `:path` and
+  /// returns true to accept (200 + session opened) or false to reject
+  /// (404 + FIN). If null, all WT CONNECTs are accepted (legacy
+  /// behaviour) so that listeners on [webTransportSessions] still see
+  /// every incoming session.
+  bool Function(String path)? webTransportAcceptor;
 
   @override
   void onRequestHeaders(
@@ -701,6 +714,21 @@ class Http3ServerProtocol extends Http3ProtocolBase {
     );
 
     if (method == 'CONNECT' && protocol == 'webtransport') {
+      final acceptor = webTransportAcceptor;
+      final accept = acceptor == null ? true : acceptor(path ?? '/');
+      if (!accept) {
+        final block = h3.build_http3_literal_headers_frame(<String, String>{
+          ':status': '404',
+        });
+        stream.write(
+          h3.build_h3_frames(<Map<String, dynamic>>[
+            <String, dynamic>{'frame_type': _h3FrameHeaders, 'payload': block},
+          ]),
+          fin: true,
+        );
+        print('⛔ [h3:$alpn] rejected WT session path=$path');
+        return;
+      }
       // draft-ietf-webtrans-http3: accept the session.
       final responseHeaderBlock = h3.build_http3_literal_headers_frame(
         <String, String>{
@@ -716,7 +744,7 @@ class Http3ServerProtocol extends Http3ProtocolBase {
       ]);
       stream.write(framed);
       print('✅ [h3:$alpn] accepted WT session on stream $streamId');
-      registerWtSession(streamId);
+      registerWtSession(streamId, path: path ?? '/');
       return;
     }
 
