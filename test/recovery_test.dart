@@ -238,4 +238,132 @@ void main() {
       expect(r.hasOutstandingAckEliciting, isFalse);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Integration-style scenarios that mirror what the QuicConnection
+  // adapters do: send → loss → retransmit + CC halving → cwnd-gated queueing.
+  // -------------------------------------------------------------------------
+  group('LossRecovery + NewReno integration', () {
+    test('lost STREAM frame is retransmitted and cwnd is halved', () {
+      final cc = NewRenoController();
+      final r = LossRecovery(rtt: RttEstimator(), cc: cc);
+
+      final retransmitted = <StreamFrameRecord>[];
+      r.onPacketsLost = (lost) {
+        for (final p in lost) {
+          for (final f in p.frames) {
+            if (f is StreamFrameRecord) retransmitted.add(f);
+          }
+        }
+      };
+
+      // Identify the lost stream frame by data byte so we can recognise it.
+      SentPacket mk(int pn, DateTime t, int marker) => SentPacket(
+        pn: pn,
+        sentTime: t,
+        sizeInBytes: 1200,
+        ackEliciting: true,
+        inFlight: true,
+        frames: [
+          StreamFrameRecord(
+            streamId: 0,
+            offset: marker,
+            data: Uint8List.fromList([marker]),
+            fin: false,
+          ),
+        ],
+      );
+
+      final cwnd0 = cc.cwnd;
+      final t0 = DateTime.now();
+      for (var i = 0; i < 5; i++) {
+        r.onPacketSent(mk(i, t0.add(Duration(microseconds: i * 1000)), i));
+      }
+      expect(cc.bytesInFlight, 5 * 1200);
+
+      // Ack PN=4 only ⇒ PN=0 and PN=1 are >=3 behind ⇒ packet-threshold loss.
+      r.onAckReceived(
+        largestAcked: 4,
+        ackedRanges: [(4, 4)],
+        ackDelayUs: 0,
+        isHandshakeConfirmed: true,
+        now: t0.add(const Duration(milliseconds: 50)),
+      );
+
+      expect(retransmitted.map((f) => f.offset), containsAll([0, 1]));
+      // NewReno halves on each distinct loss; with two losses cwnd is
+      // reduced twice from the initial window.
+      expect(cc.cwnd, lessThan(cwnd0));
+      expect(cc.cwnd, lessThanOrEqualTo(cwnd0 ~/ 2));
+      expect(cc.inRecovery, isTrue);
+    });
+
+    test('cwnd gating queues writes; drain after ACK frees in-flight', () {
+      // Mirror the adapter's queueing logic locally.
+      final cc = NewRenoController();
+      final r = LossRecovery(rtt: RttEstimator(), cc: cc);
+
+      var nextPn = 0;
+      final inFlightFrames = <int, StreamFrameRecord>{};
+      final queue = <StreamFrameRecord>[];
+
+      void rawSend(StreamFrameRecord f) {
+        final pn = nextPn++;
+        inFlightFrames[pn] = f;
+        r.onPacketSent(
+          SentPacket(
+            pn: pn,
+            sentTime: DateTime.now(),
+            sizeInBytes: 1200,
+            ackEliciting: true,
+            inFlight: true,
+            frames: [f],
+          ),
+        );
+      }
+
+      void send(StreamFrameRecord f) {
+        if (!cc.canSend(f.data.length + 50)) {
+          queue.add(f);
+          return;
+        }
+        rawSend(f);
+      }
+
+      void drain() {
+        while (queue.isNotEmpty && cc.canSend(queue.first.data.length + 50)) {
+          rawSend(queue.removeAt(0));
+        }
+      }
+
+      // Initial cwnd = 12000 B. Each in-flight packet is 1200 B and the
+      // adapter-style send check uses (data.length + 50) for headroom,
+      // so 9 packets fit (10800 B) before a 10th would exceed cwnd.
+      for (var i = 0; i < 11; i++) {
+        send(
+          StreamFrameRecord(
+            streamId: 0,
+            offset: i,
+            data: Uint8List(1200),
+            fin: false,
+          ),
+        );
+      }
+      expect(inFlightFrames.length, 9);
+      expect(queue.length, 2);
+      expect(cc.bytesInFlight, 9 * 1200);
+
+      // Ack the first 5 packets ⇒ frees 6000 B ⇒ queued frames flush.
+      r.onAckReceived(
+        largestAcked: 4,
+        ackedRanges: [(0, 4)],
+        ackDelayUs: 0,
+        isHandshakeConfirmed: true,
+      );
+      drain();
+      expect(queue, isEmpty);
+      // Both previously-queued frames should now be in flight.
+      expect(inFlightFrames.keys, containsAll([9, 10]));
+    });
+  });
 }
