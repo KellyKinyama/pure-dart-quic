@@ -25,6 +25,7 @@ export 'src/app/application_protocol.dart';
 export 'src/app/alpn_registry.dart';
 export 'src/app/h3/h3_protocol.dart';
 export 'src/app/h3/http3_server.dart';
+export 'src/app/h3/http3_reverse_proxy.dart';
 export 'src/app/webtransport/webtransport_protocol.dart';
 export 'src/app/xmpp/xmpp_protocol.dart';
 export 'src/app/media/media_protocol.dart';
