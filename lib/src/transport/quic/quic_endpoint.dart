@@ -24,33 +24,55 @@ import 'quic_connection.dart';
 import 'server_connection.dart';
 
 /// Server endpoint: listen on UDP and accept QUIC connections.
+///
+/// Multiple clients are demuxed by the source UDP 4-tuple
+/// (`address:port`); each new peer gets its own [QuicServerSession]
+/// + [ServerQuicConnection] + [ApplicationProtocol].
 class QuicServerEndpoint {
   final UdpTransport udp;
   final AlpnRegistry alpns;
 
-  /// Currently this is a single-connection demo engine; only one
-  /// [ServerQuicConnection] is alive at a time.
-  ServerQuicConnection? _conn;
-  ApplicationProtocol? _proto;
-  StreamSubscription<UdpDatagram>? _sub;
+  /// Active per-peer connections, keyed by `${address}:${port}`.
+  final Map<String, ServerQuicConnection> _conns =
+      <String, ServerQuicConnection>{};
+  final Map<ServerQuicConnection, ApplicationProtocol> _protoByConn =
+      <ServerQuicConnection, ApplicationProtocol>{};
 
-  /// The active application protocol bound to the current connection,
-  /// if any. Single-connection demo only.
+  /// Most recently accepted connection's [ApplicationProtocol]. Kept for
+  /// backward compatibility with single-connection callers; new code
+  /// should prefer [protocolFor] or read the protocol off the connection
+  /// event in [connections].
+  ApplicationProtocol? _proto;
   ApplicationProtocol? get protocol => _proto;
+
+  /// Look up the [ApplicationProtocol] bound to a given connection.
+  ApplicationProtocol? protocolFor(QuicConnection conn) =>
+      conn is ServerQuicConnection ? _protoByConn[conn] : null;
+
+  /// Snapshot of currently-active connections.
+  Iterable<ServerQuicConnection> get activeConnections => _conns.values;
+
+  StreamSubscription<UdpDatagram>? _sub;
+  Timer? _idleSweep;
+
+  /// Per-peer idle timeout. Connections with no inbound activity for
+  /// longer than this are evicted from [activeConnections].
+  final Duration idleTimeout;
 
   final StreamController<QuicConnection> _connectionsCtrl =
       StreamController<QuicConnection>.broadcast();
 
-  QuicServerEndpoint._(this.udp, this.alpns);
+  QuicServerEndpoint._(this.udp, this.alpns, this.idleTimeout);
 
   static Future<QuicServerEndpoint> bind({
     required InternetAddress address,
     required int port,
     required AlpnRegistry alpns,
     UdpTransport? transport,
+    Duration idleTimeout = const Duration(seconds: 30),
   }) async {
     final udp = transport ?? await DartUdpTransport.bind(address, port);
-    final ep = QuicServerEndpoint._(udp, alpns);
+    final ep = QuicServerEndpoint._(udp, alpns, idleTimeout);
     ep._start();
     return ep;
   }
@@ -59,6 +81,56 @@ class QuicServerEndpoint {
   Stream<QuicConnection> get connections => _connectionsCtrl.stream;
 
   void _start() {
+    _sub = udp.datagrams.listen(_dispatch);
+    _idleSweep = Timer.periodic(
+      Duration(
+        milliseconds: (idleTimeout.inMilliseconds ~/ 4).clamp(500, 5000),
+      ),
+      (_) => _evictIdle(),
+    );
+  }
+
+  void _evictIdle() {
+    final now = DateTime.now();
+    final dead = <String>[];
+    _conns.forEach((key, conn) {
+      if (now.difference(conn.lastActivity) > idleTimeout) {
+        dead.add(key);
+      }
+    });
+    for (final key in dead) {
+      _evict(key);
+    }
+  }
+
+  void _evict(String key) {
+    final conn = _conns.remove(key);
+    if (conn == null) return;
+    final proto = _protoByConn.remove(conn);
+    // Best-effort shutdown; ignore errors on dead peers.
+    Future<void>.sync(() async {
+      try {
+        if (proto != null) await proto.stop();
+      } catch (_) {}
+      try {
+        await conn.close();
+      } catch (_) {}
+    });
+  }
+
+  String _peerKey(InternetAddress addr, int port) => '${addr.address}:$port';
+
+  void _dispatch(UdpDatagram dg) {
+    final key = _peerKey(dg.address, dg.port);
+    var conn = _conns[key];
+    if (conn == null) {
+      conn = _accept(dg.address, dg.port);
+      _conns[key] = conn;
+    }
+    conn.handleDatagram(dg);
+  }
+
+  ServerQuicConnection _accept(InternetAddress addr, int port) {
     final session = QuicServerSession(socket: _rawSocketOf(udp));
     final chosenAlpn = alpns.advertisedAlpns.isNotEmpty
         ? alpns.advertisedAlpns.first
@@ -71,23 +143,47 @@ class QuicServerEndpoint {
       alpn: chosenAlpn,
       externalAppProtocol: factory != null,
     );
-    _conn = conn;
-    // Defer so callers that subscribe to [connections] right after
-    // [bind] returns don't miss this event on the broadcast stream.
-    scheduleMicrotask(() => _connectionsCtrl.add(conn));
 
     if (factory != null) {
-      _proto = factory.createServer(conn);
-      conn.ready.then((_) => _proto!.start());
+      final proto = factory.createServer(conn);
+      _protoByConn[conn] = proto;
+      _proto = proto; // latest-wins, for legacy `endpoint.protocol`
+      conn.ready.then((_) => proto.start());
     }
 
-    _sub = udp.datagrams.listen(conn.handleDatagram);
+    // Evict from the demux map when the connection closes (peer sent
+    // CONNECTION_CLOSE — see ServerQuicConnection.closed).
+    final peerKey = _peerKey(addr, port);
+    conn.closed.then((_) {
+      if (identical(_conns[peerKey], conn)) _evict(peerKey);
+    });
+
+    // Defer event emission so callers that subscribe to [connections]
+    // right after [bind] returns don't miss the first peer.
+    scheduleMicrotask(() => _connectionsCtrl.add(conn));
+    return conn;
   }
 
   Future<void> close() async {
+    _idleSweep?.cancel();
+    _idleSweep = null;
     await _sub?.cancel();
-    await _proto?.stop();
-    await _conn?.close();
+    // Snapshot to avoid concurrent-modification when conn.closed
+    // callbacks evict entries during shutdown.
+    final protos = _protoByConn.values.toList();
+    final conns = _conns.values.toList();
+    _conns.clear();
+    _protoByConn.clear();
+    for (final p in protos) {
+      try {
+        await p.stop();
+      } catch (_) {}
+    }
+    for (final c in conns) {
+      try {
+        await c.close();
+      } catch (_) {}
+    }
     await udp.close();
     await _connectionsCtrl.close();
   }

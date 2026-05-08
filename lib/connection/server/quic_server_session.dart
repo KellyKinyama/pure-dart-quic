@@ -163,6 +163,13 @@ class QuicServerSession {
   void Function(int largestAcked, int ackDelayUs, List<(int, int)> ackedRanges)?
   onApplicationAckParsed;
 
+  /// Fired once the peer has signalled CONNECTION_CLOSE (transport or
+  /// application). The endpoint uses this to evict the peer from its
+  /// per-4-tuple connection map.
+  void Function(int errorCode, String reason, bool isApplication)?
+  onConnectionClose;
+  bool _connectionCloseFired = false;
+
   /// Public allocator for server-initiated unidirectional streams.
   int allocateServerUniStreamId() => _allocateServerUniStreamId();
 
@@ -814,6 +821,11 @@ class QuicServerSession {
             '${offendingFrameType != null ? 'offendingFrameType=0x${offendingFrameType.toRadixString(16)} ' : ''}'
             'reason="$reason"',
           );
+
+          if (!_connectionCloseFired) {
+            _connectionCloseFired = true;
+            onConnectionClose?.call(errorCode, reason, frameType == 0x1d);
+          }
           break;
         }
 

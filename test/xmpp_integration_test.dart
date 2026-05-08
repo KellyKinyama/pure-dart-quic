@@ -31,8 +31,8 @@ void main() {
       alpns: alpns,
     );
 
-    server!.connections.listen((_) async {
-      final proto = server!.protocol;
+    server!.connections.listen((conn) async {
+      final proto = server!.protocolFor(conn);
       if (proto is XmppOverQuicServerProtocol) {
         final xmpp = await proto.opened;
         xmpp.stanzas.listen((s) => xmpp.send('<echo>$s</echo>'));

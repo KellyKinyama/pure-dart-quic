@@ -44,6 +44,10 @@ class ServerQuicConnection implements QuicConnection {
   final Map<int, EngineQuicStream> _streams = <int, EngineQuicStream>{};
   Timer? _readyPoller;
 
+  /// Wall-clock of the most recent inbound activity (datagram or ACK).
+  /// Used by [QuicServerEndpoint] for idle-timeout eviction.
+  DateTime lastActivity = DateTime.now();
+
   // ---------------- RFC 9002 loss recovery ----------------
   final RttEstimator _rtt = RttEstimator();
   final NewRenoController _cc = NewRenoController();
@@ -88,6 +92,7 @@ class ServerQuicConnection implements QuicConnection {
     };
 
     engineSession.onApplicationAckParsed = (largest, delayUs, ranges) {
+      lastActivity = DateTime.now();
       _recovery.onAckReceived(
         largestAcked: largest,
         ackedRanges: ranges,
@@ -96,6 +101,10 @@ class ServerQuicConnection implements QuicConnection {
       );
       _pto.rearm();
       _drainSendQueue();
+    };
+
+    engineSession.onConnectionClose = (errorCode, reason, isApp) {
+      if (!_closed.isCompleted) _closed.complete();
     };
 
     if (externalAppProtocol) {
@@ -117,6 +126,7 @@ class ServerQuicConnection implements QuicConnection {
 
   /// Feed a UDP datagram into the engine (after coalesced-packet split).
   void handleDatagram(UdpDatagram dg) {
+    lastActivity = DateTime.now();
     if (engineSession.peerAddressOrNull == null) {
       engineSession.peerAddress = dg.address;
       engineSession.peerPort = dg.port;

@@ -40,7 +40,7 @@ Future<void> main(List<String> args) async {
 
   endpoint.connections.listen((conn) {
     print('accepted QUIC connection (alpn=${conn.alpn})');
-    final proto = endpoint.protocol;
+    final proto = endpoint.protocolFor(conn);
     if (proto is Http3ServerProtocol) {
       proto.webTransportSessions.listen(_handleWtSession);
     }
