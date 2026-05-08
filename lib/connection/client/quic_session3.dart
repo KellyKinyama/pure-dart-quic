@@ -108,6 +108,11 @@ class QuicSession {
 
   RawDatagramSocket socket;
 
+  /// Remote endpoint (set by the first [sendClientHello] call). All
+  /// subsequent socket sends use these instead of hardcoded values.
+  InternetAddress remoteAddress = InternetAddress('127.0.0.1');
+  int remotePort = 4433;
+
   // Keys
   QuicKeys? initialRead, initialWrite;
   QuicKeys? handshakeRead, handshakeWrite;
@@ -194,6 +199,52 @@ class QuicSession {
   bool webTransportDatagramSent = false;
   int? activeWebTransportSessionId;
 
+  // ---------------------------------------------------------------------------
+  // External application-protocol hooks (modular API). See
+  // QuicServerSession.externalAppProtocol for full semantics.
+  // ---------------------------------------------------------------------------
+  bool externalAppProtocol = false;
+  void Function(int streamId, int offset, Uint8List data, bool fin)?
+  onIncomingStreamData;
+  void Function(Uint8List data)? onIncomingDatagram;
+  void Function()? onApplicationReady;
+  bool _appReadyFired = false;
+
+  /// Public allocator for client-initiated unidirectional streams.
+  int allocateClientUniStreamId() => _allocateClientUniStreamId();
+
+  /// Public allocator for client-initiated bidirectional streams.
+  int allocateClientBidiStreamId() => _allocateClientBidiStreamId();
+
+  /// Send a generic 1-RTT DATAGRAM frame (RFC 9221), payload verbatim.
+  void sendDatagramFrame(
+    Uint8List payload, {
+    InternetAddress? address,
+    int port = 4433,
+  }) {
+    if (!applicationSecretsDerived || appWrite == null) {
+      throw StateError('Cannot send DATAGRAM before 1-RTT keys');
+    }
+    final frame = _buildDatagramFrame(payload, useLengthField: true);
+    final ackState = ackStates[EncryptionLevel.application]!;
+    final pn = ackState.allocatePn();
+    final raw = encryptQuicPacket(
+      'short',
+      frame,
+      appWrite!.key,
+      appWrite!.iv,
+      appWrite!.hp,
+      pn,
+      peerCid ?? dcid,
+      localCid,
+      Uint8List(0),
+    );
+    if (raw == null) {
+      throw StateError('Failed to encrypt DATAGRAM packet');
+    }
+    socket.send(raw, address ?? InternetAddress('127.0.0.1'), port);
+  }
+
   late KeyPair keyPair;
 
   QuicSession(this.dcid, this.socket) {
@@ -211,14 +262,17 @@ class QuicSession {
   ClientHello? builtClientHello;
   Uint8List? clientHelloRaw;
 
-  Uint8List buildDynamicClientHello({String authority = 'localhost'}) {
+  Uint8List buildDynamicClientHello({
+    String authority = 'localhost',
+    List<String> alpns = const ['h3'],
+  }) {
     final ch = chb.buildInitialClientHello(
       hostname: authority,
       x25519PublicKey: Uint8List.fromList(
         keyPair.publicKeyBytes, // WRONG if used directly
       ),
       localCid: localCid,
-      alpns: const ['h3'],
+      alpns: alpns,
     );
 
     final wire = ch.serialize();
@@ -322,12 +376,19 @@ class QuicSession {
     required InternetAddress address,
     required int port,
     String authority = 'localhost',
+    List<String> alpns = const ['h3'],
   }) {
     if (initialWrite == null) {
       throw StateError("Initial write keys not available");
     }
 
-    final Uint8List chWire = buildDynamicClientHello(authority: authority);
+    remoteAddress = address;
+    remotePort = port;
+
+    final Uint8List chWire = buildDynamicClientHello(
+      authority: authority,
+      alpns: alpns,
+    );
     clientHelloRaw = chWire;
 
     final cryptoPayload = buildCryptoFrame(chWire);
@@ -343,7 +404,7 @@ class QuicSession {
       minDatagramSize: 1200,
     );
 
-    socket.send(rawPacket, InternetAddress("127.0.0.1"), 4433);
+    socket.send(rawPacket, remoteAddress, remotePort);
 
     print(
       "🚀 Sent Initial ClientHello pn=$pn "
@@ -412,7 +473,7 @@ class QuicSession {
     //     : rawPacket;
     final bytesToSend = rawPacket;
 
-    socket.send(bytesToSend, InternetAddress("127.0.0.1"), 4433);
+    socket.send(bytesToSend, remoteAddress, remotePort);
 
     print(
       "✅ Sent ACK ($level) pn=$pn "
@@ -560,7 +621,7 @@ class QuicSession {
       return;
     }
 
-    socket.send(rawPacket, InternetAddress("127.0.0.1"), 4433);
+    socket.send(rawPacket, remoteAddress, remotePort);
 
     print(
       "✅ Sent Client Finished (Handshake) "
@@ -1670,12 +1731,17 @@ class QuicSession {
           );
 
           if (level == EncryptionLevel.application) {
-            session.handleHttp3StreamChunk(
-              streamId,
-              streamOffset,
-              data,
-              fin: fin,
-            );
+            if (session.externalAppProtocol &&
+                session.onIncomingStreamData != null) {
+              session.onIncomingStreamData!(streamId, streamOffset, data, fin);
+            } else {
+              session.handleHttp3StreamChunk(
+                streamId,
+                streamOffset,
+                data,
+                fin: fin,
+              );
+            }
           } else {
             print('ℹ️ Ignoring non-application STREAM frame on level=$level');
           }
@@ -1702,7 +1768,12 @@ class QuicSession {
           print('✅ Parsed DATAGRAM len=${payload.length}');
 
           if (level == EncryptionLevel.application) {
-            session.handleWebTransportDatagram(payload);
+            if (session.externalAppProtocol &&
+                session.onIncomingDatagram != null) {
+              session.onIncomingDatagram!(payload);
+            } else {
+              session.handleWebTransportDatagram(payload);
+            }
           } else {
             print('ℹ️ Ignoring non-application DATAGRAM frame on level=$level');
           }
@@ -1734,6 +1805,10 @@ class QuicSession {
         // =========================================================
         if (frameType == 0x1e) {
           print('✅ Parsed HANDSHAKE_DONE');
+          if (session.externalAppProtocol && !session._appReadyFired) {
+            session._appReadyFired = true;
+            session.onApplicationReady?.call();
+          }
           continue;
         }
 
@@ -1976,7 +2051,7 @@ class QuicSession {
 
     final result = decryptPacket(pkt, actualLevel);
 
-    onDecryptedPacket(result, actualLevel, InternetAddress("127.0.0.1"), 4433);
+    onDecryptedPacket(result, actualLevel, remoteAddress, remotePort);
 
     final parsed = parsePayload(result.plaintext!, this, level: actualLevel);
 
@@ -2012,7 +2087,7 @@ class QuicSession {
     }
 
     if (serverFinishedReceived && !clientFinishedSent) {
-      sendClientFinished(address: InternetAddress("127.0.0.1"), port: 4433);
+      sendClientFinished(address: remoteAddress, port: remotePort);
       clientFinishedSent = true;
       print("📤 Client Finished sent");
     }
@@ -2627,7 +2702,7 @@ class QuicSession {
       throw StateError('Failed to encrypt application DATAGRAM packet');
     }
 
-    socket.send(rawPacket, InternetAddress("127.0.0.1"), 4433);
+    socket.send(rawPacket, remoteAddress, remotePort);
 
     print(
       '✅ Sent WebTransport DATAGRAM pn=$pn session=$sessionId len=${data.length}',
@@ -2672,7 +2747,7 @@ class QuicSession {
       throw StateError('Failed to encrypt application STREAM packet');
     }
 
-    socket.send(rawPacket, InternetAddress("127.0.0.1"), 4433);
+    socket.send(rawPacket, remoteAddress, remotePort);
 
     print(
       '✅ Sent application STREAM pn=$pn '
@@ -2782,6 +2857,11 @@ class QuicSession {
       h3.settingsReceived = true;
 
       print('✅ Received HTTP/3 SETTINGS from server: $settings');
+
+      if (externalAppProtocol) {
+        // Modular protocol owns control-stream / WT bootstrap.
+        return;
+      }
 
       // --------------------------------------------------------
       // Real HTTP/3 servers expect the client to open its own

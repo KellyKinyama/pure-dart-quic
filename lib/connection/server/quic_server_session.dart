@@ -127,6 +127,66 @@ class QuicServerSession {
   int nextServerBidiStreamId = 1;
   int nextServerUniStreamId = 3;
 
+  // ============================================================
+  // External application-protocol hooks (modular API)
+  //
+  // When [externalAppProtocol] is true:
+  //   * The engine SKIPS its built-in HTTP/3 + WebTransport bootstrap
+  //     (control stream, SETTINGS, QPACK encoder/decoder, WT CONNECT
+  //     handling, WT DATAGRAM echo).
+  //   * Incoming application STREAM frames are delivered via
+  //     [onIncomingStreamData] instead of [handleHttp3StreamChunk].
+  //   * Incoming DATAGRAM frames are delivered via [onIncomingDatagram]
+  //     instead of [handleWebTransportDatagram].
+  //   * [onApplicationReady] fires once 1-RTT keys are installed AND
+  //     HANDSHAKE_DONE has been sent.
+  //
+  // The modular adapter (lib/src/transport/quic/server_connection.dart)
+  // sets these so application protocols (HTTP/3, WebTransport, …)
+  // implemented in lib/src/app/ own the wire-format above QUIC.
+  // ============================================================
+  bool externalAppProtocol = false;
+  void Function(int streamId, int offset, Uint8List data, bool fin)?
+  onIncomingStreamData;
+  void Function(Uint8List data)? onIncomingDatagram;
+  void Function()? onApplicationReady;
+
+  /// Public allocator for server-initiated unidirectional streams.
+  int allocateServerUniStreamId() => _allocateServerUniStreamId();
+
+  /// Public allocator for server-initiated bidirectional streams.
+  int allocateServerBidiStreamId() {
+    final id = nextServerBidiStreamId;
+    nextServerBidiStreamId += 4;
+    return id;
+  }
+
+  /// Send a generic 1-RTT DATAGRAM frame (RFC 9221). The payload is
+  /// transmitted verbatim — no WebTransport `session_id` prefix is
+  /// added; that is the application's responsibility.
+  void sendDatagramFrame(Uint8List payload) {
+    if (!applicationSecretsDerived || appWrite == null) {
+      throw StateError('Cannot send DATAGRAM before 1-RTT keys');
+    }
+    final frame = _buildDatagramFrame(payload, useLengthField: true);
+    final pn = _allocateSendPn(EncryptionLevel.application);
+    final raw = encryptQuicPacket(
+      'short',
+      frame,
+      appWrite!.key,
+      appWrite!.iv,
+      appWrite!.hp,
+      pn,
+      _dcidForShortHeader(),
+      localCid,
+      Uint8List(0),
+    );
+    if (raw == null) {
+      throw StateError('Failed to encrypt DATAGRAM packet');
+    }
+    socket.send(raw, peerAddress, peerPort);
+  }
+
   QuicServerSession({required this.socket}) {
     print("Server certificate hash: ${fingerprint(serverCert.cert)}");
     localCid = _randomCid(8);
@@ -344,21 +404,14 @@ class QuicServerSession {
       return;
     }
 
-    // ✅ ALWAYS ACK application packets
-    if (level == EncryptionLevel.application) {
-      sendAck(level: EncryptionLevel.application);
-      return;
-    }
-
-    if (handshakeComplete) {
-      sendAck(level: EncryptionLevel.application);
-      return;
-    }
-
-    if (level == EncryptionLevel.initial ||
-        level == EncryptionLevel.handshake) {
-      sendAck(level: level);
-    }
+    // RFC 9000 §13.2.1: ACKs MUST be sent in packets of the same
+    // encryption level as the packets being acknowledged. If the
+    // server up-levels Handshake ACKs to application packets, the
+    // client never sees its Finished get acked at the handshake
+    // level and retransmits CRYPTO forever (visible in Chrome as
+    // "More than 10000 outstanding ... last_decrypted_packet_level:
+    // ENCRYPTION_HANDSHAKE" or as endless handshake-level PINGs).
+    sendAck(level: level);
   }
 
   int _allocateSendPn(EncryptionLevel level) {
@@ -371,6 +424,21 @@ class QuicServerSession {
     final ackState = ackStates[level];
     if (ackState == null || ackState.received.isEmpty) {
       return;
+    }
+
+    // Cap ACK ranges so the encoded ACK frame can't exceed the
+    // peer's max_udp_payload_size. Without this, every PN ever
+    // received accumulates in `received` and the ACK frame
+    // eventually triggers PROTOCOL_VIOLATION ("Packet too large.")
+    // on Chrome. RFC 9000 §13.2.1 explicitly allows partial ACK
+    // coverage — keep only the most recent packet numbers.
+    const int maxAckEntries = 32;
+    if (ackState.received.length > maxAckEntries) {
+      final sorted = ackState.received.toList()..sort();
+      final keep = sorted.sublist(sorted.length - maxAckEntries);
+      ackState.received
+        ..clear()
+        ..addAll(keep);
     }
 
     final ackFrame = buildAckFromSet(
@@ -597,7 +665,11 @@ class QuicServerSession {
           ackEliciting = true;
 
           if (level == EncryptionLevel.application) {
-            handleHttp3StreamChunk(streamId, streamOffset, data, fin: fin);
+            if (externalAppProtocol && onIncomingStreamData != null) {
+              onIncomingStreamData!(streamId, streamOffset, data, fin);
+            } else {
+              handleHttp3StreamChunk(streamId, streamOffset, data, fin: fin);
+            }
           } else {
             print('ℹ️ Ignoring non-application STREAM frame on level=$level');
           }
@@ -625,7 +697,11 @@ class QuicServerSession {
           ackEliciting = true;
 
           if (level == EncryptionLevel.application) {
-            handleWebTransportDatagram(payload);
+            if (externalAppProtocol && onIncomingDatagram != null) {
+              onIncomingDatagram!(payload);
+            } else {
+              handleWebTransportDatagram(payload);
+            }
           } else {
             print('ℹ️ Ignoring non-application DATAGRAM frame on level=$level');
           }
@@ -874,9 +950,20 @@ class QuicServerSession {
   // }
 
   Uint8List _dcidForShortHeader() {
-    // For server → client 1‑RTT packets,
-    // DCID MUST be the CID the client uses to identify this server.
-    return localCid;
+    // RFC 9000 §17.3 / §5.1: the DCID of a 1-RTT (short-header)
+    // packet sent by the server MUST be a connection ID the *peer*
+    // (the client) chose — i.e. the value that arrived in the SCID
+    // field of the client's first long-header packet, which we
+    // recorded as [peerScid].
+    //
+    // A zero-length [peerScid] is legal: the client opted out of
+    // CID-based demultiplexing and identifies the connection by its
+    // UDP 4-tuple. In that case the short header simply has no CID
+    // bytes after the first byte. Returning [localCid] here makes
+    // Chrome silently drop every 1-RTT packet (including
+    // HANDSHAKE_DONE), and the connection loops on handshake-level
+    // PTO probes.
+    return peerScid;
   }
   // void handleDatagram(Uint8List pkt) {
   //   final packetLevel = detectPacketLevel(pkt);
@@ -1323,16 +1410,22 @@ class QuicServerSession {
     // 1️⃣ HANDSHAKE_DONE
     _sendHandshakeDone();
 
-    // 2️⃣ HTTP/3 SETTINGS (MUST be first control stream bytes)
-    sendHttp3ControlStream();
+    if (externalAppProtocol) {
+      // The modular API will drive HTTP/3 / WebTransport / etc.
+      // through the QuicConnection adapter; engine stays out of it.
+      onApplicationReady?.call();
+    } else {
+      // 2️⃣ HTTP/3 SETTINGS (MUST be first control stream bytes)
+      sendHttp3ControlStream();
 
-    // 3️⃣ QPACK streams
-    sendQpackStreams();
+      // 3️⃣ QPACK streams
+      sendQpackStreams();
 
-    // 4️⃣ Transport flow control
-    sendMaxData(1024 * 1024);
-    sendMaxStreamDataBidi(64 * 1024);
-    sendMaxStreamsBidi(100);
+      // 4️⃣ Transport flow control
+      sendMaxData(1024 * 1024);
+      sendMaxStreamDataBidi(64 * 1024);
+      sendMaxStreamsBidi(100);
+    }
 
     // Timer.periodic(const Duration(milliseconds: 10), (_) {
     //   sendHttp3SettingsPing();
