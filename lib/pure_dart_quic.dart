@@ -19,6 +19,7 @@ export 'src/transport/quic/quic_endpoint.dart';
 export 'src/transport/quic/server_connection.dart';
 export 'src/transport/quic/client_connection.dart';
 export 'src/transport/quic/engine_quic_stream.dart';
+export 'src/transport/quic/recovery/recovery.dart';
 
 export 'src/app/application_protocol.dart';
 export 'src/app/alpn_registry.dart';

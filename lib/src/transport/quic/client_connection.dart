@@ -11,6 +11,15 @@ import '../../../constants.dart';
 import '../udp/udp_transport.dart';
 import 'engine_quic_stream.dart';
 import 'quic_connection.dart';
+import 'recovery/recovery.dart';
+
+class _QueuedStreamSend {
+  final int streamId;
+  final Uint8List data;
+  final bool fin;
+  final int offset;
+  const _QueuedStreamSend(this.streamId, this.data, this.fin, this.offset);
+}
 
 class ClientQuicConnection implements QuicConnection {
   final QuicSession engineSession;
@@ -27,6 +36,25 @@ class ClientQuicConnection implements QuicConnection {
   final Map<int, EngineQuicStream> _streams = <int, EngineQuicStream>{};
   Timer? _readyPoller;
 
+  // ---------------- RFC 9002 loss recovery ----------------
+  final RttEstimator _rtt = RttEstimator();
+  final NewRenoController _cc = NewRenoController();
+  late final LossRecovery _recovery;
+  late final PtoTimer _pto;
+
+  /// Captured immediately before each engine call so the
+  /// `onApplicationPacketSent` callback can attach the right
+  /// retransmittable frame to the [SentPacket] record.
+  StreamFrameRecord? _pendingStreamFrame;
+
+  /// Pending stream writes that exceeded the congestion window.
+  final List<_QueuedStreamSend> _sendQueue = <_QueuedStreamSend>[];
+
+  /// Exposed for diagnostics / tests.
+  LossRecovery get lossRecovery => _recovery;
+  NewRenoController get congestionController => _cc;
+  RttEstimator get rttEstimator => _rtt;
+
   ClientQuicConnection({
     required this.engineSession,
     required this.udp,
@@ -34,6 +62,40 @@ class ClientQuicConnection implements QuicConnection {
     bool externalAppProtocol = true,
   }) : _alpn = alpn {
     engineSession.externalAppProtocol = externalAppProtocol;
+
+    _recovery = LossRecovery(rtt: _rtt, cc: _cc);
+    _pto = PtoTimer(_recovery);
+    _recovery.onPacketsLost = _retransmitLost;
+    _recovery.onPtoProbe = _sendProbe;
+
+    engineSession.onApplicationPacketSent = (pn, size, ackEliciting) {
+      final frames = _pendingStreamFrame == null
+          ? const <RetransmittableFrame>[]
+          : <RetransmittableFrame>[_pendingStreamFrame!];
+      _pendingStreamFrame = null;
+      _recovery.onPacketSent(
+        SentPacket(
+          pn: pn,
+          sentTime: DateTime.now(),
+          sizeInBytes: size,
+          ackEliciting: ackEliciting,
+          inFlight: ackEliciting,
+          frames: frames,
+        ),
+      );
+      _pto.rearm();
+    };
+
+    engineSession.onApplicationAckParsed = (largest, delayUs, ranges) {
+      _recovery.onAckReceived(
+        largestAcked: largest,
+        ackedRanges: ranges,
+        ackDelayUs: delayUs,
+        isHandshakeConfirmed: true,
+      );
+      _pto.rearm();
+      _drainSendQueue();
+    };
 
     if (externalAppProtocol) {
       engineSession.onIncomingStreamData = _handleIncomingStreamData;
@@ -89,12 +151,62 @@ class ClientQuicConnection implements QuicConnection {
     bool fin = false,
     int offset = 0,
   }) {
+    // Conservative size estimate for CC gating: payload + ~50 B overhead.
+    final estSize = data.length + 50;
+    if (!_cc.canSend(estSize)) {
+      _sendQueue.add(_QueuedStreamSend(streamId, data, fin, offset));
+      return;
+    }
+    _pendingStreamFrame = StreamFrameRecord(
+      streamId: streamId,
+      offset: offset,
+      data: data,
+      fin: fin,
+    );
     engineSession.sendApplicationStream(
       streamId,
       data,
       fin: fin,
       offset: offset,
     );
+    _pendingStreamFrame = null;
+  }
+
+  void _drainSendQueue() {
+    while (_sendQueue.isNotEmpty) {
+      final next = _sendQueue.first;
+      if (!_cc.canSend(next.data.length + 50)) break;
+      _sendQueue.removeAt(0);
+      _sendOnEngine(
+        next.streamId,
+        next.data,
+        fin: next.fin,
+        offset: next.offset,
+      );
+    }
+  }
+
+  void _retransmitLost(List<SentPacket> lost) {
+    for (final p in lost) {
+      for (final f in p.frames) {
+        if (f is StreamFrameRecord) {
+          _sendOnEngine(f.streamId, f.data, fin: f.fin, offset: f.offset);
+        }
+      }
+    }
+  }
+
+  void _sendProbe() {
+    // Best-effort PTO probe: retransmit the oldest in-flight stream
+    // frame if any. Client engine has no public PING helper.
+    for (final p in _recovery.inFlightPackets) {
+      for (final f in p.frames) {
+        if (f is StreamFrameRecord) {
+          _sendOnEngine(f.streamId, f.data, fin: f.fin, offset: f.offset);
+          return;
+        }
+      }
+    }
   }
 
   @override
@@ -143,12 +255,14 @@ class ClientQuicConnection implements QuicConnection {
 
   @override
   void sendDatagram(Uint8List data) {
+    _pendingStreamFrame = null; // DATAGRAMs are not retransmittable.
     engineSession.sendDatagramFrame(data);
   }
 
   @override
   Future<void> close({int errorCode = 0, String? reason}) async {
     _readyPoller?.cancel();
+    _pto.cancel();
     if (!_ready.isCompleted) _ready.completeError(StateError('closed'));
     if (!_closed.isCompleted) _closed.complete();
     await _incomingStreams.close();
