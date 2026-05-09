@@ -37,7 +37,7 @@ Future<void> main(List<String> args) async {
           );
           proto.publish(
             MoqObject(
-              trackId: 1,
+              track: track,
               groupId: groupId,
               objectId: objectId,
               payload: payload,

@@ -39,7 +39,7 @@ void main() {
           for (var i = 0; i < 3; i++) {
             proto.publish(
               MoqObject(
-                trackId: 1,
+                track: track,
                 groupId: 0,
                 objectId: i,
                 payload: Uint8List.fromList('frame$i:$track'.codeUnits),

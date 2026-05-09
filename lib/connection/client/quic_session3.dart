@@ -232,7 +232,7 @@ class QuicSession {
   void sendDatagramFrame(
     Uint8List payload, {
     InternetAddress? address,
-    int port = 4433,
+    int? port,
   }) {
     if (!applicationSecretsDerived || appWrite == null) {
       throw StateError('Cannot send DATAGRAM before 1-RTT keys');
@@ -254,7 +254,7 @@ class QuicSession {
     if (raw == null) {
       throw StateError('Failed to encrypt DATAGRAM packet');
     }
-    socket.send(raw, address ?? InternetAddress('127.0.0.1'), port);
+    socket.send(raw, address ?? remoteAddress, port ?? remotePort);
   }
 
   late KeyPair keyPair;

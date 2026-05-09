@@ -14,6 +14,7 @@ const int tpInitialMaxStreamsBidi = 0x0008;
 const int tpInitialMaxStreamsUni = 0x0009;
 const int tpActiveConnectionIdLimit = 0x000e;
 const int tpInitialSourceConnectionId = 0x000f;
+const int tpMaxDatagramFrameSize = 0x0020;
 
 /// ------------------------------------------------------------
 /// QUIC varint encoder
@@ -188,6 +189,10 @@ ClientHello buildInitialClientHello({
     ..add(_tpInt(tpInitialMaxStreamsBidi, 16))
     ..add(_tpInt(tpInitialMaxStreamsUni, 16))
     ..add(_tpInt(tpActiveConnectionIdLimit, 4))
+    // Enables QUIC DATAGRAM (RFC 9221) in the client->server direction.
+    // Without this, peers MUST NOT send DATAGRAM frames to this client,
+    // and (more importantly) we MUST NOT send DATAGRAMs to the server.
+    ..add(_tpInt(tpMaxDatagramFrameSize, 65527))
     ..add(_tpBytes(tpInitialSourceConnectionId, localCid));
 
   extensions.add(

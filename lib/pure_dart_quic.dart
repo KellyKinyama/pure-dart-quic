@@ -37,6 +37,8 @@ export 'src/app/xmpp/xmpp_protocol.dart';
 export 'src/app/mqtt/mqtt_protocol.dart';
 export 'src/app/media/media_protocol.dart';
 export 'src/app/sip/sip_protocol.dart';
+export 'src/app/webdav/webdav_protocol.dart';
+export 'src/app/webdav/webdav_h3.dart';
 
 /// Legacy stub kept for the existing `test/pure_dart_quic_test.dart`.
 int calculate() => 42;
