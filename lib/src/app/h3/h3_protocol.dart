@@ -145,7 +145,15 @@ class WebTransportSession {
       ...writeVarInt(sessionId),
     ]);
     qs.write(prefix);
-    return WebTransportStream._(qs.id, qs);
+    final wts = WebTransportStream._(qs.id, qs);
+    // Although uni streams are write-only from this side, attach the
+    // pipe for symmetry / safety.
+    qs.incoming.listen(
+      wts._deliver,
+      onDone: wts._close,
+      onError: (Object _) => wts._close(),
+    );
+    return wts;
   }
 
   /// Open a new WebTransport bidirectional stream toward the peer.
@@ -158,7 +166,15 @@ class WebTransportSession {
       ...writeVarInt(sessionId),
     ]);
     qs.write(prefix);
-    return WebTransportStream._(qs.id, qs);
+    final wts = WebTransportStream._(qs.id, qs);
+    // Forward inbound bytes from the peer (the response side of this
+    // client-initiated bidi stream) into the WT stream's controller.
+    qs.incoming.listen(
+      wts._deliver,
+      onDone: wts._close,
+      onError: (Object _) => wts._close(),
+    );
+    return wts;
   }
 
   void _deliverDatagram(Uint8List payload) {
