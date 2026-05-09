@@ -677,6 +677,46 @@ class Http3Request {
     final framed = h3.build_h3_frames(frames);
     stream.write(framed, fin: true);
   }
+
+  /// Streaming alternative to [respond]:
+  ///
+  ///   * Call [respondHeaders] exactly once to send the HEADERS frame.
+  ///   * Call [writeBody] zero or more times to append DATA frames.
+  ///   * Call [endResponse] (or `writeBody(..., fin: true)`) to FIN.
+  ///
+  /// Useful for proxying upstream byte streams of unknown size.
+  void respondHeaders(
+    int status, {
+    Map<String, String> headers = const <String, String>{},
+  }) {
+    if (_responded) {
+      throw StateError('Http3Request already responded');
+    }
+    _responded = true;
+    final fields = <String, String>{':status': status.toString(), ...headers};
+    final headerBlock = h3.build_http3_literal_headers_frame(fields);
+    final framed = h3.build_h3_frames(<Map<String, dynamic>>[
+      <String, dynamic>{'frame_type': _h3FrameHeaders, 'payload': headerBlock},
+    ]);
+    stream.write(framed);
+  }
+
+  /// Append a DATA frame to a response previously started with
+  /// [respondHeaders]. Set [fin] true on the final chunk.
+  void writeBody(Uint8List chunk, {bool fin = false}) {
+    if (chunk.isEmpty && !fin) return;
+    final frames = <Map<String, dynamic>>[
+      if (chunk.isNotEmpty)
+        <String, dynamic>{'frame_type': _h3FrameData, 'payload': chunk},
+    ];
+    final framed = chunk.isEmpty ? Uint8List(0) : h3.build_h3_frames(frames);
+    stream.write(framed, fin: fin);
+  }
+
+  /// Close the response (FIN the stream) without sending more bytes.
+  void endResponse() {
+    stream.write(Uint8List(0), fin: true);
+  }
 }
 
 /// Signature for an HTTP/3 application request handler.

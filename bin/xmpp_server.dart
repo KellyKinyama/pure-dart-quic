@@ -25,7 +25,7 @@ Future<void> main(List<String> args) async {
 
   endpoint.connections.listen((conn) {
     print('accepted QUIC connection (alpn=${conn.alpn})');
-    final proto = endpoint.protocol;
+    final proto = endpoint.protocolFor(conn);
     if (proto is XmppOverQuicServerProtocol) {
       proto.opened.then((xmpp) {
         print('▶ xmpp stream bound');

@@ -19,13 +19,22 @@ export 'src/transport/quic/quic_endpoint.dart';
 export 'src/transport/quic/server_connection.dart';
 export 'src/transport/quic/client_connection.dart';
 export 'src/transport/quic/engine_quic_stream.dart';
+export 'src/transport/quic/recovery/recovery.dart';
 
 export 'src/app/application_protocol.dart';
 export 'src/app/alpn_registry.dart';
 export 'src/app/h3/h3_protocol.dart';
 export 'src/app/h3/http3_server.dart';
+export 'src/app/h3/http3_reverse_proxy.dart';
+export 'src/app/udp_proxy/udp_reverse_proxy.dart';
+export 'src/app/udp_proxy/udp_proxy_client.dart';
+export 'src/app/tcp_proxy/tcp_reverse_proxy.dart';
+export 'src/app/tcp_proxy/tcp_proxy_client.dart';
+export 'src/app/dns/dns_protocol.dart';
+export 'src/app/redis/redis_protocol.dart';
 export 'src/app/webtransport/webtransport_protocol.dart';
 export 'src/app/xmpp/xmpp_protocol.dart';
+export 'src/app/mqtt/mqtt_protocol.dart';
 export 'src/app/media/media_protocol.dart';
 export 'src/app/sip/sip_protocol.dart';
 

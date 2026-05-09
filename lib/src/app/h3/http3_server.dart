@@ -171,7 +171,7 @@ class Http3Server {
     _endpoint = ep;
 
     ep.connections.listen((conn) {
-      final proto = ep.protocol;
+      final proto = ep.protocolFor(conn);
       if (proto is Http3ServerProtocol) {
         proto.requestHandler = _dispatch;
         if (_wtRoutes.isNotEmpty) {
@@ -190,6 +190,9 @@ class Http3Server {
     final ep = _endpoint;
     if (ep == null) return;
     _endpoint = null;
+    // The endpoint's full close() runs every per-connection protocol
+    // shutdown which can race with WT session teardown in-isolate; the
+    // demo / tests are happy with just dropping the UDP socket.
     await ep.udp.close();
   }
 

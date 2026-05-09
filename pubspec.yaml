@@ -20,6 +20,7 @@ dependencies:
   elliptic: ^0.3.12
   events_emitter: ^0.5.2
   hex: ^0.2.0
+  http2: ^2.3.0
   path: ^1.9.0
   pointycastle: ^4.0.0
   x25519: ^0.1.1

@@ -208,6 +208,18 @@ class QuicSession {
   onIncomingStreamData;
   void Function(Uint8List data)? onIncomingDatagram;
   void Function()? onApplicationReady;
+
+  /// Fired right after a 1-RTT (application) packet is encrypted and
+  /// sent. Delivers the packet number the engine allocated, the
+  /// encrypted UDP payload size, and whether the packet contained an
+  /// ack-eliciting frame. Used by the modular loss-recovery layer.
+  void Function(int pn, int sizeInBytes, bool ackEliciting)?
+  onApplicationPacketSent;
+
+  /// Fired when an application-level ACK frame is parsed from the
+  /// peer. [ackedRanges] is a list of inclusive [low, high] pairs.
+  void Function(int largestAcked, int ackDelayUs, List<(int, int)> ackedRanges)?
+  onApplicationAckParsed;
   bool _appReadyFired = false;
 
   /// Public allocator for client-initiated unidirectional streams.
@@ -1699,6 +1711,23 @@ class QuicSession {
             '✅ Parsed ACK largest=$largest delay=$delay firstRange=$firstRange',
           );
 
+          if (level == EncryptionLevel.application) {
+            // Decode inclusive [low, high] ranges from the gap/length list.
+            final decoded = <(int, int)>[];
+            var rh = largest;
+            var rl = largest - firstRange;
+            decoded.add((rl, rh));
+            for (final r in ranges) {
+              final gap = (r as dynamic).gap as int;
+              final len = (r as dynamic).length as int;
+              rh = rl - gap - 2;
+              rl = rh - len;
+              if (rl < 0) break;
+              decoded.add((rl, rh));
+            }
+            session.onApplicationAckParsed?.call(largest, delay << 3, decoded);
+          }
+
           continue;
         }
 
@@ -2707,6 +2736,8 @@ class QuicSession {
     print(
       '✅ Sent WebTransport DATAGRAM pn=$pn session=$sessionId len=${data.length}',
     );
+
+    onApplicationPacketSent?.call(pn, rawPacket.length, true);
   }
 
   void sendApplicationStream(
@@ -2753,6 +2784,8 @@ class QuicSession {
       '✅ Sent application STREAM pn=$pn '
       'streamId=$streamId len=${data.length} fin=$fin',
     );
+
+    onApplicationPacketSent?.call(pn, rawPacket.length, true);
   }
 
   Uint8List _buildStreamFrame({

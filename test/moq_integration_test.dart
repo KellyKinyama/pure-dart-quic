@@ -32,8 +32,8 @@ void main() {
       alpns: alpns,
     );
 
-    server!.connections.listen((_) {
-      final proto = server!.protocol;
+    server!.connections.listen((conn) {
+      final proto = server!.protocolFor(conn);
       if (proto is MediaOverQuicServerProtocol) {
         proto.subscribes.listen((track) {
           for (var i = 0; i < 3; i++) {

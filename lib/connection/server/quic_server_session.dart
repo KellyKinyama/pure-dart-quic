@@ -151,6 +151,25 @@ class QuicServerSession {
   void Function(Uint8List data)? onIncomingDatagram;
   void Function()? onApplicationReady;
 
+  /// Fired right after a 1-RTT (application) packet is encrypted and
+  /// sent. Delivers the packet number the engine allocated, the
+  /// encrypted UDP payload size, and whether the packet contained an
+  /// ack-eliciting frame. Used by the modular loss-recovery layer.
+  void Function(int pn, int sizeInBytes, bool ackEliciting)?
+  onApplicationPacketSent;
+
+  /// Fired when an application-level ACK frame is parsed from the
+  /// peer. [ackedRanges] is a list of inclusive [low, high] pairs.
+  void Function(int largestAcked, int ackDelayUs, List<(int, int)> ackedRanges)?
+  onApplicationAckParsed;
+
+  /// Fired once the peer has signalled CONNECTION_CLOSE (transport or
+  /// application). The endpoint uses this to evict the peer from its
+  /// per-4-tuple connection map.
+  void Function(int errorCode, String reason, bool isApplication)?
+  onConnectionClose;
+  bool _connectionCloseFired = false;
+
   /// Public allocator for server-initiated unidirectional streams.
   int allocateServerUniStreamId() => _allocateServerUniStreamId();
 
@@ -185,6 +204,7 @@ class QuicServerSession {
       throw StateError('Failed to encrypt DATAGRAM packet');
     }
     socket.send(raw, peerAddress, peerPort);
+    onApplicationPacketSent?.call(pn, raw.length, true);
   }
 
   QuicServerSession({required this.socket}) {
@@ -581,15 +601,37 @@ class QuicServerSession {
           if (buffer.remaining == 0) break;
           final firstRange = buffer.pullVarInt();
 
-          for (int i = 0; i < rangeCount; i++) {
-            if (buffer.remaining == 0) break;
-            buffer.pullVarInt(); // gap
+          // Decode ACK ranges into [low, high] inclusive pairs.
+          final ranges = <(int, int)>[];
+          var rangeHigh = largest;
+          var rangeLow = largest - firstRange;
+          ranges.add((rangeLow, rangeHigh));
 
-            if (buffer.remaining == 0) break;
-            buffer.pullVarInt(); // range length
+          var brokeRanges = false;
+          for (int i = 0; i < rangeCount; i++) {
+            if (buffer.remaining == 0) {
+              brokeRanges = true;
+              break;
+            }
+            final gap = buffer.pullVarInt();
+
+            if (buffer.remaining == 0) {
+              brokeRanges = true;
+              break;
+            }
+            final len = buffer.pullVarInt();
+
+            // RFC 9000 §19.3.1: next range high = previous low - gap - 2.
+            rangeHigh = rangeLow - gap - 2;
+            rangeLow = rangeHigh - len;
+            if (rangeLow < 0) {
+              brokeRanges = true;
+              break;
+            }
+            ranges.add((rangeLow, rangeHigh));
           }
 
-          if (hasEcn) {
+          if (hasEcn && !brokeRanges) {
             if (buffer.remaining == 0) break;
             buffer.pullVarInt(); // ect0
 
@@ -603,6 +645,12 @@ class QuicServerSession {
           print(
             '✅ Server parsed ACK largest=$largest delay=$delay firstRange=$firstRange',
           );
+
+          if (level == EncryptionLevel.application) {
+            // ACK_DELAY field is encoded in units of 2^ack_delay_exponent µs.
+            // Default exponent = 3 ⇒ each unit = 8 µs.
+            onApplicationAckParsed?.call(largest, delay << 3, ranges);
+          }
           continue;
         }
 
@@ -773,6 +821,11 @@ class QuicServerSession {
             '${offendingFrameType != null ? 'offendingFrameType=0x${offendingFrameType.toRadixString(16)} ' : ''}'
             'reason="$reason"',
           );
+
+          if (!_connectionCloseFired) {
+            _connectionCloseFired = true;
+            onConnectionClose?.call(errorCode, reason, frameType == 0x1d);
+          }
           break;
         }
 
@@ -1782,6 +1835,8 @@ class QuicServerSession {
       '✅ Sent application STREAM pn=$pn streamId=$streamId '
       'len=${data.length} fin=$fin',
     );
+
+    onApplicationPacketSent?.call(pn, raw.length, true);
   }
 
   int _allocateServerUniStreamId() {
