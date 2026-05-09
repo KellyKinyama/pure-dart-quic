@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Socket.IO over WebTransport — browser demo</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font: 14px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
+      max-width: 720px;
+      margin: 24px auto;
+      padding: 0 16px;
+      color: #222;
+    }
+    h1 { margin-top: 0; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+    .row input, .row button { padding: 6px 10px; font: inherit; }
+    .row input[type=text] { flex: 1; }
+    #status {
+      padding: 6px 10px;
+      border-radius: 4px;
+      font-weight: 600;
+      display: inline-block;
+    }
+    .status-disconnected { background: #fde0e0; color: #b00; }
+    .status-connecting   { background: #fff4d6; color: #8a6d00; }
+    .status-connected    { background: #d8f5d8; color: #075; }
+    #log {
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      padding: 8px;
+      height: 320px;
+      overflow: auto;
+      background: #fafafa;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+    }
+    .me  { color: #057; }
+    .you { color: #444; }
+    .sys { color: #888; font-style: italic; }
+    .err { color: #b00; }
+  </style>
+</head>
+<body>
+  <h1>Socket.IO over WebTransport</h1>
+
+  <p>
+    This page connects to <code>bin/socketio_server.dart</code> over a real
+    WebTransport session (HTTP/3 + extended CONNECT) and uses the same
+    length-prefixed JSON wire format as the Dart client.
+  </p>
+
+  <div class="row">
+    <label>URL <input id="url" type="text" value="https://localhost:4444/socket.io" /></label>
+    <label>Hash (sha-256, base64)
+      <input id="hash" type="text" placeholder="optional, see README" size="50" />
+    </label>
+  </div>
+  <div class="row">
+    <button id="btnConnect">Connect</button>
+    <button id="btnDisconnect" disabled>Disconnect</button>
+    <button id="btnWhoami" disabled>whoami</button>
+    <button id="btnPing" disabled>ping</button>
+    <span id="status" class="status-disconnected">disconnected</span>
+  </div>
+  <div class="row">
+    <input id="text" type="text" placeholder="say something to the lobby…" disabled />
+    <button id="btnSay" disabled>Send</button>
+  </div>
+
+  <div id="log"></div>
+
+  <script type="module">
+    import { SocketIoOverWt } from './socketio_client.js';
+
+    const $ = (id) => document.getElementById(id);
+    const log = (cls, ...parts) => {
+      const line = document.createElement('div');
+      line.className = cls;
+      line.textContent = `[${new Date().toLocaleTimeString()}] ` +
+        parts.map((p) => typeof p === 'string' ? p : JSON.stringify(p)).join(' ');
+      $('log').appendChild(line);
+      $('log').scrollTop = $('log').scrollHeight;
+    };
+    const setStatus = (label, cls) => {
+      const s = $('status');
+      s.textContent = label;
+      s.className = cls;
+    };
+    const setControls = (connected) => {
+      $('btnConnect').disabled = connected;
+      $('btnDisconnect').disabled = !connected;
+      $('btnWhoami').disabled = !connected;
+      $('btnPing').disabled = !connected;
+      $('btnSay').disabled = !connected;
+      $('text').disabled = !connected;
+      $('url').disabled = connected;
+      $('hash').disabled = connected;
+    };
+
+    let io = null;
+
+    $('btnConnect').addEventListener('click', async () => {
+      try {
+        setStatus('connecting…', 'status-connecting');
+        const transportOpts = {};
+        const hash = $('hash').value.trim();
+        if (hash) {
+          // Accept base64 (Chrome's preferred form).
+          const raw = Uint8Array.from(atob(hash), (c) => c.charCodeAt(0));
+          transportOpts.serverCertificateHashes = [
+            { algorithm: 'sha-256', value: raw },
+          ];
+        }
+        io = await SocketIoOverWt.connect({
+          url: $('url').value.trim(),
+          namespace: '/',
+          transportOpts,
+        });
+        log('sys', `connected as ${io.id}`);
+        setStatus(`connected (${io.id})`, 'status-connected');
+        setControls(true);
+
+        io.on('msg', (args) => {
+          const [from, ...payload] = args;
+          log('you', `${from} >`, ...payload);
+        });
+
+        io.onDisconnect(() => {
+          log('sys', 'disconnected');
+          setStatus('disconnected', 'status-disconnected');
+          setControls(false);
+          io = null;
+        });
+      } catch (e) {
+        log('err', 'connect failed:', e?.message || String(e));
+        setStatus('disconnected', 'status-disconnected');
+        setControls(false);
+      }
+    });
+
+    $('btnDisconnect').addEventListener('click', async () => {
+      await io?.disconnect();
+    });
+
+    $('btnSay').addEventListener('click', () => {
+      const t = $('text').value;
+      if (!t) return;
+      io?.emit('say', [t]);
+      log('me', `me >`, t);
+      $('text').value = '';
+      $('text').focus();
+    });
+
+    $('text').addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') $('btnSay').click();
+    });
+
+    $('btnWhoami').addEventListener('click', async () => {
+      try {
+        const r = await io.emitWithAck('whoami');
+        log('sys', 'whoami ->', r);
+      } catch (e) {
+        log('err', 'whoami failed:', e?.message || String(e));
+      }
+    });
+
+    $('btnPing').addEventListener('click', async () => {
+      const t0 = Date.now();
+      try {
+        const r = await io.emitWithAck('ping');
+        log('sys', `ping -> ${JSON.stringify(r)} rtt=${Date.now() - t0}ms`);
+      } catch (e) {
+        log('err', 'ping failed:', e?.message || String(e));
+      }
+    });
+  </script>
+</body>
+</html>
