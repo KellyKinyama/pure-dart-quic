@@ -73,6 +73,7 @@ const String alpnH3_29 = 'h3-29';
 const String alpnPing = 'ping/1.0';
 const String alpnXmppOverQuic = 'xmpp-quic';
 const String alpnMediaOverQuic = 'moq-00';
+const String alpnUdpProxy = 'udp-proxy';
 
 /// Server preference order.
 /// The first match with the client's offered ALPNs wins.
@@ -84,6 +85,7 @@ const List<String> supportedAlpnProtocols = [
   alpnPing,
   alpnXmppOverQuic,
   alpnMediaOverQuic,
+  alpnUdpProxy,
 ];
 
 String chooseServerAlpn(List<String> clientOffered) {
