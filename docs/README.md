@@ -10,6 +10,7 @@ QUIC engine. Each protocol is a self-contained module under
 | WebTransport | `h3`, `wt`, `webtransport` | [`h3_protocol.dart`](../lib/src/app/h3/h3_protocol.dart) | [`bin/server.dart`](../bin/server.dart) / [`bin/client.dart`](../bin/client.dart) | [webtransport.md](webtransport.md) |
 | XMPP-over-QUIC | `xmpp-quic` | [`xmpp_protocol.dart`](../lib/src/app/xmpp/xmpp_protocol.dart) | [`bin/xmpp_server.dart`](../bin/xmpp_server.dart) / [`bin/xmpp_client.dart`](../bin/xmpp_client.dart) | [xmpp.md](xmpp.md) |
 | Media-over-QUIC | `moq-00` | [`media_protocol.dart`](../lib/src/app/media/media_protocol.dart) | [`bin/moq_server.dart`](../bin/moq_server.dart) / [`bin/moq_client.dart`](../bin/moq_client.dart) | [moq.md](moq.md) |
+| RTP-over-QUIC | `roq-09` | [`rtp_protocol.dart`](../lib/src/app/rtp/rtp_protocol.dart) | [`bin/rtp_server.dart`](../bin/rtp_server.dart) / [`bin/rtp_client.dart`](../bin/rtp_client.dart) | — |
 | SIP-over-QUIC | `sip` (stub) | [`sip_protocol.dart`](../lib/src/app/sip/sip_protocol.dart) | — | [sip.md](sip.md) |
 
 ## Architecture in one picture

@@ -80,6 +80,7 @@ const String alpnRedisOverQuic = 'redis';
 const String alpnTcpProxy = 'tcp-proxy';
 const String alpnSipOverQuic = 'sip';
 const String alpnWebDavOverQuic = 'webdav-quic';
+const String alpnRtpOverQuic = 'roq-09';
 
 /// Server preference order.
 /// The first match with the client's offered ALPNs wins.
@@ -98,6 +99,7 @@ const List<String> supportedAlpnProtocols = [
   alpnTcpProxy,
   alpnSipOverQuic,
   alpnWebDavOverQuic,
+  alpnRtpOverQuic,
 ];
 
 String chooseServerAlpn(List<String> clientOffered) {
