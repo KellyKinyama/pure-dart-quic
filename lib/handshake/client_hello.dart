@@ -79,6 +79,31 @@ List<TlsExtension> parseExtensions(QuicBuffer buffer) {
 }
 
 // =============================================================
+// pre_shared_key (0x0029) parsed view (RFC 8446 §4.2.11)
+// =============================================================
+
+class PskIdentity {
+  final Uint8List identity;
+  final int obfuscatedTicketAge;
+  PskIdentity(this.identity, this.obfuscatedTicketAge);
+}
+
+class ParsedPreSharedKey {
+  final List<PskIdentity> identities;
+  final List<Uint8List> binders;
+  /// Offset, within the ClientHello body (`rawData`), of the first byte of
+  /// the 2-byte binders_list_length field. A server validates the first
+  /// binder by HMACing the ClientHello prefix that ends at this offset
+  /// (after prepending the 4-byte handshake message header).
+  final int bindersListOffsetInBody;
+  ParsedPreSharedKey({
+    required this.identities,
+    required this.binders,
+    required this.bindersListOffsetInBody,
+  });
+}
+
+// =============================================================
 // ClientHello
 // =============================================================
 
@@ -104,6 +129,8 @@ class ClientHello extends TlsHandshakeMessage {
   Uint8List? preSharedKey;
   Uint8List? renegotiationInfo;
   Uint8List? quicTransportParametersRaw;
+  ParsedPreSharedKey? parsedPreSharedKey;
+  bool offeredEarlyData = false;
 
   final Uint8List rawData;
 
@@ -273,13 +300,18 @@ class ClientHello extends TlsHandshakeMessage {
     final extensionsLen = (view[ptr++] << 8) | view[ptr++];
     final extensions = <TlsExtension>[];
     final extEnd = ptr + extensionsLen;
+    int? pskExtStartInBody;
 
     while (ptr < extEnd) {
       final extType = (view[ptr++] << 8) | view[ptr++];
       final extLen = (view[ptr++] << 8) | view[ptr++];
+      final extStart = ptr;
       final extData = view.sublist(ptr, ptr + extLen);
       ptr += extLen;
 
+      if (extType == 0x0029) {
+        pskExtStartInBody = extStart;
+      }
       extensions.add(
         TlsExtension(type: extType, length: extLen, data: extData),
       );
@@ -297,6 +329,8 @@ class ClientHello extends TlsHandshakeMessage {
     Uint8List? cookie;
     List<int>? pskKeyExchangeModes;
     Uint8List? quicTransportParametersRaw;
+    ParsedPreSharedKey? parsedPreSharedKey;
+    bool offeredEarlyData = false;
 
     for (final ext in extensions) {
       final buf = QuicBuffer(data: ext.data);
@@ -401,12 +435,54 @@ class ClientHello extends TlsHandshakeMessage {
           quicTransportParametersRaw = ext.data;
           break;
 
+        // ------------------------------------------------------
+        // early_data (0x002a) — body MUST be empty in ClientHello (RFC 8446 §4.2.10)
+        // ------------------------------------------------------
+        case 0x002a:
+          offeredEarlyData = true;
+          break;
+
+        // ------------------------------------------------------
+        // pre_shared_key (0x0029) — MUST be the last extension (RFC 8446 §4.2.11)
+        // ------------------------------------------------------
+        case 0x0029:
+          if (buf.remaining < 2) break;
+          final identityListLen = buf.pullUint16();
+          final identityEnd = buf.readOffset + identityListLen;
+          final identities = <PskIdentity>[];
+          while (buf.readOffset < identityEnd && buf.remaining >= 2) {
+            final idLen = buf.pullUint16();
+            final idBytes = buf.pullBytes(idLen);
+            final age = (buf.pullUint8() << 24) |
+                (buf.pullUint8() << 16) |
+                (buf.pullUint8() << 8) |
+                buf.pullUint8();
+            identities.add(PskIdentity(idBytes, age));
+          }
+          if (buf.remaining < 2) break;
+          final binderListLen = buf.pullUint16();
+          final binderEnd = buf.readOffset + binderListLen;
+          final binders = <Uint8List>[];
+          while (buf.readOffset < binderEnd && buf.remaining >= 1) {
+            final bLen = buf.pullUint8();
+            binders.add(buf.pullBytes(bLen));
+          }
+          if (pskExtStartInBody != null) {
+            parsedPreSharedKey = ParsedPreSharedKey(
+              identities: identities,
+              binders: binders,
+              bindersListOffsetInBody:
+                  pskExtStartInBody + 2 + identityListLen,
+            );
+          }
+          break;
+
         default:
           break;
       }
     }
 
-    return ClientHello(
+    final result = ClientHello(
       type: 'client_hello',
       legacyVersion: legacyVersion,
       random: random,
@@ -425,6 +501,9 @@ class ClientHello extends TlsHandshakeMessage {
       pskKeyExchangeModes: pskKeyExchangeModes,
       quicTransportParametersRaw: quicTransportParametersRaw,
     );
+    result.parsedPreSharedKey = parsedPreSharedKey;
+    result.offeredEarlyData = offeredEarlyData;
+    return result;
   }
 
   // ------------------------------------------------------------
