@@ -218,12 +218,12 @@ ClientHello buildInitialClientHello({
     random: random,
     sessionId: Uint8List(0),
     cipherSuites: const [
-      // Both SHA-256-based TLS 1.3 cipher suites are wired through
-      // the consumer's QUIC key schedule (dart-quiche). AES-128-GCM
-      // is preferred when both are acceptable. AES-256-GCM (0x1302)
-      // is intentionally omitted until the SHA-384 transcript path
-      // is plumbed end-to-end.
+      // All three QUIC v1 TLS 1.3 cipher suites are wired through the
+      // consumer's QUIC key schedule (dart-quiche). Order signals
+      // preference: AES-128-GCM first, then AES-256-GCM (SHA-384),
+      // then ChaCha20-Poly1305 as a software fallback.
       0x1301,
+      0x1302,
       0x1303,
     ],
     compressionMethods: Uint8List.fromList([0x00]),
