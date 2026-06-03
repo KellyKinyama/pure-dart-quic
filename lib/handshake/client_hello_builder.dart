@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import '../buffer.dart';
 import '../handshake/client_hello.dart';
+import '../handshake/psk_offer.dart';
 import '../handshake/tls_msg.dart';
 
 /// ------------------------------------------------------------
@@ -230,6 +231,96 @@ ClientHello buildInitialClientHello({
     extensions: extensions,
     rawData: Uint8List(0),
     alpn: alpns,
+  );
+}
+
+/// ------------------------------------------------------------
+/// Build a ClientHello that offers a resumption PSK (RFC 8446
+/// §4.2.11) and optionally signals 0-RTT (`early_data`, type 0x002a).
+///
+/// Returns a [BuiltClientHello] whose `bytes` are the fully serialized
+/// CH with the binder slot left zeroed. The caller must:
+///   1. Compute `binder = HMAC(finished_key,
+///         transcript_hash(bytes[0..binderOffset-3]))`
+///      using its own TLS 1.3 key schedule (see dart-quiche's
+///      `HandshakeSecrets.pskBinder`).
+///   2. Overwrite `bytes[binderOffset .. binderOffset + binderLen]`
+///      with the result.
+/// After patching, `bytes` is ready to ship.
+///
+/// If [psk] is null this is functionally identical to
+/// `buildInitialClientHello(...).serialize()` — the helper exists so
+/// callers always get the same `BuiltClientHello` shape regardless
+/// of whether resumption is being attempted.
+BuiltClientHello buildClientHelloWithPsk({
+  required String hostname,
+  required Uint8List x25519PublicKey,
+  required Uint8List localCid,
+  List<String> alpns = const ['h3'],
+  PskOffer? psk,
+}) {
+  final ch = buildInitialClientHello(
+    hostname: hostname,
+    x25519PublicKey: x25519PublicKey,
+    localCid: localCid,
+    alpns: alpns,
+  );
+
+  if (psk == null) {
+    return BuiltClientHello(bytes: ch.serialize());
+  }
+
+  // serialize() will lazily upsert the ALPN extension (0x0010) if it
+  // isn't already present, appending it at the end — that would push
+  // ALPN AFTER pre_shared_key and violate RFC 8446 §4.2.11. Force
+  // ALPN into the list now so the subsequent psk append is genuinely
+  // last on the wire.
+  ch.upsertAlpnExtension();
+
+  if (psk.offerEarlyData) {
+    // early_data (RFC 8446 §4.2.10) — empty body in ClientHello.
+    ch.extensions.add(
+      TlsExtension(type: 0x002a, length: 0, data: Uint8List(0)),
+    );
+  }
+
+  // pre_shared_key (RFC 8446 §4.2.11) MUST be the last extension.
+  // Wire layout, single identity:
+  //   identities_list_len  uint16  = 2 + ident.len + 4
+  //     identity_len       uint16
+  //     identity           opaque[ident.len]
+  //     obfuscated_age     uint32
+  //   binders_list_len     uint16  = 1 + binder.len
+  //     binder_len         uint8   = binder.len
+  //     binder             opaque[binder.len]   ← zeroed; caller patches
+  final identitiesListLen = 2 + psk.identity.length + 4;
+  final bindersListLen = 1 + psk.binderLen;
+  final pskData = BytesBuilder()
+    ..add([(identitiesListLen >> 8) & 0xff, identitiesListLen & 0xff])
+    ..add([(psk.identity.length >> 8) & 0xff, psk.identity.length & 0xff])
+    ..add(psk.identity)
+    ..add([
+      (psk.obfuscatedTicketAge >> 24) & 0xff,
+      (psk.obfuscatedTicketAge >> 16) & 0xff,
+      (psk.obfuscatedTicketAge >> 8) & 0xff,
+      psk.obfuscatedTicketAge & 0xff,
+    ])
+    ..add([(bindersListLen >> 8) & 0xff, bindersListLen & 0xff])
+    ..add([psk.binderLen])
+    ..add(Uint8List(psk.binderLen));
+  final pskBytes = pskData.toBytes();
+  ch.extensions.add(
+    TlsExtension(type: 0x0029, length: pskBytes.length, data: pskBytes),
+  );
+
+  final serialized = ch.serialize();
+
+  // The binder bytes are the very last `binderLen` bytes of the CH.
+  final binderOffset = serialized.length - psk.binderLen;
+  return BuiltClientHello(
+    bytes: serialized,
+    binderOffset: binderOffset,
+    binderLen: psk.binderLen,
   );
 }
 
